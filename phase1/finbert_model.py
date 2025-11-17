@@ -520,7 +520,19 @@ def train_finbert(
     val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
     # Prepare callbacks
+    # Note: transformers models need callbacks with _implements_train_batch_hooks
     callbacks = []
+
+    # Helper function to patch callbacks for transformers compatibility
+    def patch_callback(cb):
+        """Add missing methods to callbacks for transformers compatibility."""
+        if not hasattr(cb, '_implements_train_batch_hooks'):
+            cb._implements_train_batch_hooks = lambda: False
+        if not hasattr(cb, '_implements_test_batch_hooks'):
+            cb._implements_test_batch_hooks = lambda: False
+        if not hasattr(cb, '_implements_predict_batch_hooks'):
+            cb._implements_predict_batch_hooks = lambda: False
+        return cb
 
     # Early stopping
     early_stopping = EarlyStopping(
@@ -529,7 +541,7 @@ def train_finbert(
         restore_best_weights=True,
         verbose=1
     )
-    callbacks.append(early_stopping)
+    callbacks.append(patch_callback(early_stopping))
 
     # Model checkpointing
     checkpoint_path = MODEL_DIR / 'finbert_best_model.h5'
@@ -540,7 +552,7 @@ def train_finbert(
         save_weights_only=False,
         verbose=1
     )
-    callbacks.append(checkpoint)
+    callbacks.append(patch_callback(checkpoint))
 
     # Learning rate reduction
     reduce_lr = ReduceLROnPlateau(
@@ -550,11 +562,12 @@ def train_finbert(
         min_lr=1e-7,
         verbose=1
     )
-    callbacks.append(reduce_lr)
+    callbacks.append(patch_callback(reduce_lr))
 
     # Memory monitor
     if PSUTIL_AVAILABLE:
-        callbacks.append(MemoryMonitor())
+        mem_monitor = MemoryMonitor()
+        callbacks.append(patch_callback(mem_monitor))
 
     # TensorBoard
     try:
@@ -562,7 +575,7 @@ def train_finbert(
             log_dir=str(OUTPUT_DIR / 'logs'),
             histogram_freq=1
         )
-        callbacks.append(tensorboard)
+        callbacks.append(patch_callback(tensorboard))
     except:
         pass
 
