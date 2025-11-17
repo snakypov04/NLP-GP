@@ -1,18 +1,17 @@
 """
 =============================================================================
-Comparative Visualization Module for Financial Sentiment Analysis
+FinBERT Fine-tuning for Financial Sentiment Analysis
 =============================================================================
 
-Publication-quality visualizations comparing Phase 1 Baseline (LR) vs BiLSTM
-Optimized for Google Colab display system
+Phase 3: Transformer-based model using ProsusAI/finbert
+Optimized for Google Colab T4 GPU (16GB VRAM)
 
 Features:
-- Colab-optimized matplotlib backend and display
-- Interactive widgets for parameter tuning
-- Comparative performance visualizations
-- BiLSTM-specific training visualizations
-- Memory management for large datasets
-- Export functionality (PNG/PDF)
+- Finance-specific BERT (FinBERT) from Hugging Face
+- Mixed precision training for T4 GPU
+- Memory-efficient training
+- Comprehensive evaluation metrics
+- Training history visualization
 
 Author: NLP Engineering Team
 Date: 2024
@@ -23,28 +22,58 @@ import os
 import json
 import gc
 import warnings
+import re
 from pathlib import Path
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional
+from datetime import datetime
 import logging
 
 import numpy as np
 import pandas as pd
-import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from matplotlib.backends.backend_pdf import PdfPages
 import seaborn as sns
-from scipy import stats
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_recall_fscore_support,
+    confusion_matrix, classification_report, roc_curve, auc,
+    roc_auc_score
+)
+from sklearn.preprocessing import label_binarize
+from sklearn.utils.class_weight import compute_class_weight
 
-# Colab-specific imports with fallbacks
+# TensorFlow imports
 try:
-    from IPython.display import display, HTML, clear_output
-    import ipywidgets as widgets
-    from ipywidgets import interact, interactive, fixed, interact_manual
+    import tensorflow as tf
+    from tensorflow.keras.optimizers import Adam
+    from tensorflow.keras.callbacks import (
+        EarlyStopping, ModelCheckpoint, ReduceLROnPlateau,
+        TensorBoard, Callback
+    )
+    TENSORFLOW_AVAILABLE = True
+except ImportError as e:
+    TENSORFLOW_AVAILABLE = False
+    raise ImportError("TensorFlow is required")
+
+# Hugging Face imports
+try:
+    from transformers import (
+        TFBertForSequenceClassification,
+        BertTokenizer,
+        BertConfig
+    )
+    from transformers import logging as hf_logging
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    raise ImportError(
+        "transformers library required. Install with: pip install transformers"
+    )
+
+# Colab-specific imports
+try:
+    from IPython.display import display, HTML
     COLAB_AVAILABLE = True
 except ImportError:
     COLAB_AVAILABLE = False
-    print("Note: Running outside Colab - interactive widgets disabled")
 
 # Memory monitoring
 try:
@@ -54,6 +83,7 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
+hf_logging.set_verbosity_error()
 
 # Configure logging
 logging.basicConfig(
@@ -62,76 +92,116 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Constants
+RANDOM_SEED = 42
+MAX_LENGTH = 30
+BATCH_SIZE = 32
+LEARNING_RATE = 2e-5
+EPOCHS = 5
+PATIENCE = 2
+DROPOUT = 0.2
+
+# Paths
+OUTPUT_DIR = Path('finbert_results')
+MODEL_DIR = OUTPUT_DIR / 'models'
+PLOTS_DIR = OUTPUT_DIR / 'plots'
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Set style for plots
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (12, 8)
+plt.rcParams['font.size'] = 10
+
 # =============================================================================
-# COLAB DISPLAY OPTIMIZATIONS
+# TEXT PREPROCESSING (Phase 1 consistency)
 # =============================================================================
 
 
-def configure_colab_display():
-    """Configure matplotlib for optimal Colab display."""
-    # Set backend for Colab
-    if COLAB_AVAILABLE:
-        matplotlib.use('Agg')  # Use non-interactive backend
-        plt.ioff()  # Turn off interactive mode
-
-    # High-DPI rendering for sharp images
-    plt.rcParams['figure.dpi'] = 100
-    plt.rcParams['savefig.dpi'] = 300
-    plt.rcParams['savefig.bbox'] = 'tight'
-    plt.rcParams['savefig.pad_inches'] = 0.1
-
-    # Colab-optimized figure sizes
-    plt.rcParams['figure.figsize'] = (14, 8)
-    plt.rcParams['figure.max_open_warning'] = 0
-
-    # Professional styling
-    sns.set_style("whitegrid")
-    plt.rcParams['font.size'] = 11
-    plt.rcParams['axes.labelsize'] = 12
-    plt.rcParams['axes.titlesize'] = 14
-    plt.rcParams['xtick.labelsize'] = 10
-    plt.rcParams['ytick.labelsize'] = 10
-    plt.rcParams['legend.fontsize'] = 10
-    plt.rcParams['figure.titlesize'] = 16
-
-    # Finance-appropriate color scheme
-    plt.rcParams['axes.prop_cycle'] = plt.cycler(
-        color=['#1f77b4', '#2ca02c', '#d62728', '#ff7f0e', '#9467bd']
-    )
-
-    logger.info("✓ Colab display configured")
-
-
-def auto_display_plot(fig, save_path: Optional[str] = None,
-                      show_in_colab: bool = True):
+def clean_text(text: str) -> str:
     """
-    Automatically display plot in Colab and save if path provided.
-
-    Args:
-        fig: Matplotlib figure object
-        save_path: Optional path to save figure
-        show_in_colab: Whether to display in Colab
+    Clean text using EXACT Phase 1 preprocessing approach.
+    Must match preprocess_dataset.py to ensure consistency.
     """
-    if save_path:
-        fig.savefig(save_path, dpi=300, bbox_inches='tight',
-                    facecolor='white', edgecolor='none')
-        logger.info(f"✓ Saved: {save_path}")
+    if pd.isna(text) or text == '':
+        return ''
 
-    if COLAB_AVAILABLE and show_in_colab:
-        display(fig)
+    # Convert to lowercase
+    text = text.lower()
 
-    plt.close(fig)
-    gc.collect()
+    # Remove URLs
+    text = re.sub(r'https?://\S+|www\.\S+', '', text, flags=re.IGNORECASE)
+
+    # Remove special characters except apostrophes and spaces
+    text = re.sub(r"[^a-z0-9'\s]", '', text)
+
+    # Remove extra whitespace
+    text = re.sub(r'\s+', ' ', text)
+
+    # Strip leading/trailing whitespace
+    text = text.strip()
+
+    return text
 
 
 # =============================================================================
-# MEMORY MANAGEMENT
+# GPU CONFIGURATION
+# =============================================================================
+
+def configure_t4_gpu():
+    """Configure T4 GPU with mixed precision and memory growth."""
+    logger.info("=" * 80)
+    logger.info("T4 GPU CONFIGURATION")
+    logger.info("=" * 80)
+
+    # Set random seed
+    tf.random.set_seed(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+
+    gpus = tf.config.list_physical_devices('GPU')
+
+    if not gpus:
+        logger.warning("No GPU devices found. Using CPU.")
+        return False
+
+    try:
+        for gpu in gpus:
+            # Enable memory growth
+            tf.config.experimental.set_memory_growth(gpu, True)
+
+            # Get GPU details
+            try:
+                gpu_details = tf.config.experimental.get_device_details(gpu)
+                gpu_name = gpu_details.get('device_name', 'Unknown GPU')
+                logger.info(f"✓ GPU detected: {gpu_name}")
+            except:
+                logger.info(f"✓ GPU detected: {gpu.name}")
+
+        # Enable mixed precision training (FP16)
+        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        tf.keras.mixed_precision.set_global_policy(policy)
+        logger.info("✓ Mixed precision (FP16) enabled for T4 GPU")
+
+        # Enable XLA JIT compilation
+        tf.config.optimizer.set_jit(True)
+        logger.info("✓ XLA JIT compilation enabled")
+
+        return True
+
+    except RuntimeError as e:
+        logger.error(f"GPU configuration error: {e}")
+        return False
+
+
+# =============================================================================
+# MEMORY MONITORING
 # =============================================================================
 
 def get_memory_usage() -> Dict:
     """Get current memory usage statistics."""
     if not PSUTIL_AVAILABLE:
-        return {'available': True}
+        return {'available': False}
 
     mem = psutil.virtual_memory()
     return {
@@ -142,577 +212,591 @@ def get_memory_usage() -> Dict:
     }
 
 
-def check_memory_warning(threshold: float = 85.0) -> bool:
-    """
-    Check if memory usage exceeds threshold and warn.
-
-    Args:
-        threshold: Memory usage percentage threshold
-
-    Returns:
-        True if warning should be issued
-    """
+def print_memory_status(label: str = ""):
+    """Print formatted memory status."""
     if not PSUTIL_AVAILABLE:
-        return False
-
-    mem = get_memory_usage()
-    if mem['percent'] > threshold:
-        logger.warning(
-            f"⚠️  Memory usage at {mem['percent']:.1f}% - "
-            f"consider clearing variables"
-        )
-        return True
-    return False
-
-
-def clear_memory():
-    """Clear memory and run garbage collection."""
-    gc.collect()
-    if COLAB_AVAILABLE:
-        try:
-            from IPython import get_ipython
-            get_ipython().magic('reset -sf')
-        except:
-            pass
-    logger.info("✓ Memory cleared")
-
-
-# =============================================================================
-# DATA LOADING
-# =============================================================================
-
-def load_metrics(baseline_path: str, bilstm_path: str) -> Tuple[Dict, Dict]:
-    """
-    Load metrics from both models.
-
-    Args:
-        baseline_path: Path to baseline metrics JSON
-        bilstm_path: Path to BiLSTM metrics JSON
-
-    Returns:
-        Tuple of (baseline_metrics, bilstm_metrics)
-    """
-    logger.info("Loading metrics...")
-
-    with open(baseline_path, 'r') as f:
-        baseline_data = json.load(f)
-
-    with open(bilstm_path, 'r') as f:
-        bilstm_data = json.load(f)
-
-    # Extract test metrics (baseline has nested structure)
-    baseline_metrics = baseline_data.get('test_metrics', baseline_data)
-    bilstm_metrics = bilstm_data
-
-    logger.info("✓ Metrics loaded")
-    return baseline_metrics, bilstm_metrics
-
-
-def load_training_history(history_path: Optional[str] = None) -> Optional[Dict]:
-    """
-    Load training history if available.
-
-    Args:
-        history_path: Path to training history JSON (optional)
-
-    Returns:
-        Training history dict or None
-    """
-    if history_path and os.path.exists(history_path):
-        with open(history_path, 'r') as f:
-            return json.load(f)
-    return None
-
-
-# =============================================================================
-# COMPARATIVE VISUALIZATIONS
-# =============================================================================
-
-def plot_performance_comparison(
-    baseline_metrics: Dict,
-    bilstm_metrics: Dict,
-    save_path: Optional[str] = None
-):
-    """
-    Create side-by-side performance comparison bar chart.
-
-    Args:
-        baseline_metrics: Baseline model metrics
-        bilstm_metrics: BiLSTM model metrics
-        save_path: Optional path to save figure
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('Model Performance Comparison: Baseline LR vs BiLSTM',
-                 fontsize=16, fontweight='bold', y=0.995)
-
-    # Extract metrics
-    baseline_cv = baseline_metrics.get('cross_validation', {})
-    baseline_std = baseline_cv.get('std_accuracy', 0.0)
-
-    models = ['Baseline LR', 'BiLSTM']
-    colors = ['#1f77b4', '#2ca02c']
-
-    # 1. Overall Accuracy
-    ax = axes[0, 0]
-    accuracies = [
-        baseline_metrics['accuracy'],
-        bilstm_metrics['accuracy']
-    ]
-    errors = [baseline_std, 0.0]  # BiLSTM doesn't have CV std
-
-    bars = ax.bar(models, accuracies, yerr=errors, capsize=10,
-                  color=colors, alpha=0.8, edgecolor='black', linewidth=1.5)
-    ax.set_ylabel('Accuracy', fontsize=12, fontweight='bold')
-    ax.set_title('Overall Accuracy', fontsize=13, fontweight='bold')
-    ax.set_ylim([0.65, 0.85])
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-
-    # Add value labels on bars
-    for i, (bar, acc) in enumerate(zip(bars, accuracies)):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                f'{acc:.3f}', ha='center', va='bottom', fontweight='bold')
-
-    # Add improvement annotation
-    improvement = accuracies[1] - accuracies[0]
-    ax.annotate(f'+{improvement:.3f}',
-                xy=(1, accuracies[1]), xytext=(1.3, accuracies[1] + 0.02),
-                arrowprops=dict(arrowstyle='->', color='green', lw=2),
-                fontsize=12, fontweight='bold', color='green')
-
-    # 2. Weighted F1 Score
-    ax = axes[0, 1]
-    f1_scores = [
-        baseline_metrics['weighted_f1'],
-        bilstm_metrics['weighted_f1']
-    ]
-
-    bars = ax.bar(models, f1_scores, color=colors, alpha=0.8,
-                  edgecolor='black', linewidth=1.5)
-    ax.set_ylabel('Weighted F1 Score', fontsize=12, fontweight='bold')
-    ax.set_title('Weighted F1 Score', fontsize=13, fontweight='bold')
-    ax.set_ylim([0.65, 0.85])
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-
-    for i, (bar, f1) in enumerate(zip(bars, f1_scores)):
-        height = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-                f'{f1:.3f}', ha='center', va='bottom', fontweight='bold')
-
-    improvement = f1_scores[1] - f1_scores[0]
-    ax.annotate(f'+{improvement:.3f}',
-                xy=(1, f1_scores[1]), xytext=(1.3, f1_scores[1] + 0.02),
-                arrowprops=dict(arrowstyle='->', color='green', lw=2),
-                fontsize=12, fontweight='bold', color='green')
-
-    # 3. Per-Class F1 Scores
-    ax = axes[1, 0]
-    classes = ['Negative', 'Neutral', 'Positive']
-    x = np.arange(len(classes))
-    width = 0.35
-
-    baseline_f1 = [
-        baseline_metrics['per_class_metrics']['negative']['f1'],
-        baseline_metrics['per_class_metrics']['neutral']['f1'],
-        baseline_metrics['per_class_metrics']['positive']['f1']
-    ]
-    bilstm_f1 = [
-        bilstm_metrics['per_class_metrics']['negative']['f1'],
-        bilstm_metrics['per_class_metrics']['neutral']['f1'],
-        bilstm_metrics['per_class_metrics']['positive']['f1']
-    ]
-
-    bars1 = ax.bar(x - width/2, baseline_f1, width, label='Baseline LR',
-                   color=colors[0], alpha=0.8, edgecolor='black', linewidth=1.5)
-    bars2 = ax.bar(x + width/2, bilstm_f1, width, label='BiLSTM',
-                   color=colors[1], alpha=0.8, edgecolor='black', linewidth=1.5)
-
-    ax.set_ylabel('F1 Score', fontsize=12, fontweight='bold')
-    ax.set_title('Per-Class F1 Scores', fontsize=13, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels(classes)
-    ax.legend()
-    ax.set_ylim([0.65, 0.85])
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-
-    # Add value labels
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 0.005,
-                    f'{height:.3f}', ha='center', va='bottom', fontsize=9)
-
-    # 4. ROC AUC Scores
-    ax = axes[1, 1]
-    baseline_auc = [
-        baseline_metrics['roc_auc_scores']['class_-1'],
-        baseline_metrics['roc_auc_scores']['class_0'],
-        baseline_metrics['roc_auc_scores']['class_1']
-    ]
-    bilstm_auc = [
-        bilstm_metrics['roc_auc_scores']['class_-1'],
-        bilstm_metrics['roc_auc_scores']['class_0'],
-        bilstm_metrics['roc_auc_scores']['class_1']
-    ]
-
-    bars1 = ax.bar(x - width/2, baseline_auc, width, label='Baseline LR',
-                   color=colors[0], alpha=0.8, edgecolor='black', linewidth=1.5)
-    bars2 = ax.bar(x + width/2, bilstm_auc, width, label='BiLSTM',
-                   color=colors[1], alpha=0.8, edgecolor='black', linewidth=1.5)
-
-    ax.set_ylabel('ROC AUC Score', fontsize=12, fontweight='bold')
-    ax.set_title('ROC AUC Scores (One-vs-Rest)',
-                 fontsize=13, fontweight='bold')
-    ax.set_xticks(x)
-    ax.set_xticklabels(classes)
-    ax.legend()
-    ax.set_ylim([0.80, 0.95])
-    ax.grid(axis='y', alpha=0.3, linestyle='--')
-
-    # Add value labels
-    for bars in [bars1, bars2]:
-        for bar in bars:
-            height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + 0.005,
-                    f'{height:.3f}', ha='center', va='bottom', fontsize=9)
-
-    plt.tight_layout()
-    auto_display_plot(fig, save_path)
-
-
-def plot_roc_comparison(
-    baseline_metrics: Dict,
-    bilstm_metrics: Dict,
-    save_path: Optional[str] = None
-):
-    """
-    Create overlaid ROC curve comparison.
-
-    Args:
-        baseline_metrics: Baseline model metrics
-        bilstm_metrics: BiLSTM model metrics
-        save_path: Optional path to save figure
-    """
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle('ROC Curve Comparison: Baseline LR vs BiLSTM',
-                 fontsize=16, fontweight='bold')
-
-    classes = ['Negative', 'Neutral', 'Positive']
-    class_values = [-1, 0, 1]
-    colors_class = ['#d62728', '#1f77b4', '#2ca02c']
-
-    # Load ROC curves if available (would need to be saved separately)
-    # For now, we'll create theoretical curves based on AUC scores
-
-    for idx, (class_name, class_val, color) in enumerate(
-        zip(classes, class_values, colors_class)
-    ):
-        ax = axes[idx]
-
-        # Get AUC scores
-        baseline_auc = baseline_metrics['roc_auc_scores'][f'class_{class_val}']
-        bilstm_auc = bilstm_metrics['roc_auc_scores'][f'class_{class_val}']
-
-        # Create theoretical ROC curves (simplified)
-        fpr = np.linspace(0, 1, 100)
-
-        # Approximate TPR from AUC (simplified model)
-        def auc_to_tpr(fpr, auc_score):
-            # Simple approximation: TPR = AUC * FPR + (1-AUC) * FPR^2
-            return auc_score * fpr + (1 - auc_score) * fpr ** 2
-
-        baseline_tpr = auc_to_tpr(fpr, baseline_auc)
-        bilstm_tpr = auc_to_tpr(fpr, bilstm_auc)
-
-        # Plot curves
-        ax.plot(fpr, baseline_tpr, '--', linewidth=2.5,
-                label=f'Baseline LR (AUC = {baseline_auc:.3f})',
-                color='#1f77b4', alpha=0.8)
-        ax.plot(fpr, bilstm_tpr, '-', linewidth=2.5,
-                label=f'BiLSTM (AUC = {bilstm_auc:.3f})',
-                color='#2ca02c', alpha=0.8)
-        ax.plot([0, 1], [0, 1], 'k--', linewidth=1, alpha=0.5,
-                label='Random Classifier')
-
-        ax.set_xlabel('False Positive Rate', fontsize=11, fontweight='bold')
-        ax.set_ylabel('True Positive Rate', fontsize=11, fontweight='bold')
-        ax.set_title(f'{class_name} Class', fontsize=12, fontweight='bold')
-        ax.legend(loc='lower right', fontsize=9)
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim([0.0, 1.0])
-        ax.set_ylim([0.0, 1.05])
-
-        # Add improvement annotation
-        improvement = bilstm_auc - baseline_auc
-        ax.text(0.6, 0.2, f'ΔAUC: +{improvement:.3f}',
-                fontsize=10, fontweight='bold', color='green',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-
-    plt.tight_layout()
-    auto_display_plot(fig, save_path)
-
-
-def plot_confusion_matrix_comparison(
-    baseline_metrics: Dict,
-    bilstm_metrics: Dict,
-    save_path: Optional[str] = None
-):
-    """
-    Create side-by-side confusion matrix comparison with normalized percentages.
-
-    Args:
-        baseline_metrics: Baseline model metrics
-        bilstm_metrics: BiLSTM model metrics
-        save_path: Optional path to save figure
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle('Confusion Matrix Comparison (Normalized Percentages)',
-                 fontsize=16, fontweight='bold')
-
-    labels = ['Negative', 'Neutral', 'Positive']
-
-    for idx, (metrics, title) in enumerate([
-        (baseline_metrics, 'Baseline LR'),
-        (bilstm_metrics, 'BiLSTM')
-    ]):
-        ax = axes[idx]
-        cm = np.array(metrics['confusion_matrix'])
-
-        # Normalize to percentages
-        cm_normalized = (cm / cm.sum(axis=1, keepdims=True)) * 100
-
-        # Create heatmap
-        sns.heatmap(cm_normalized, annot=True, fmt='.1f', cmap='Blues',
-                    xticklabels=labels, yticklabels=labels,
-                    cbar_kws={'label': 'Percentage (%)'}, ax=ax,
-                    vmin=0, vmax=100, linewidths=1, linecolor='black')
-
-        ax.set_title(f'{title}\n(Accuracy: {metrics["accuracy"]:.3f})',
-                     fontsize=13, fontweight='bold')
-        ax.set_ylabel('True Label', fontsize=11, fontweight='bold')
-        ax.set_xlabel('Predicted Label', fontsize=11, fontweight='bold')
-
-    plt.tight_layout()
-    auto_display_plot(fig, save_path)
-
-
-# =============================================================================
-# BILSTM-SPECIFIC VISUALIZATIONS
-# =============================================================================
-
-def plot_training_curves_interactive(
-    history: Dict,
-    save_path: Optional[str] = None,
-    epoch_range: Optional[Tuple[int, int]] = None
-):
-    """
-    Plot BiLSTM training/validation curves with optional epoch range.
-
-    Args:
-        history: Training history dictionary
-        save_path: Optional path to save figure
-        epoch_range: Optional tuple of (start_epoch, end_epoch)
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-    fig.suptitle('BiLSTM Training History', fontsize=16, fontweight='bold')
-
-    if epoch_range:
-        start, end = epoch_range
-        epochs = list(range(start, min(end, len(history['loss']))))
-    else:
-        epochs = list(range(len(history['loss'])))
-
-    # Loss
-    ax = axes[0, 0]
-    ax.plot(epochs, [history['loss'][e] for e in epochs],
-            label='Training Loss', linewidth=2.5, color='#1f77b4')
-    ax.plot(epochs, [history['val_loss'][e] for e in epochs],
-            label='Validation Loss', linewidth=2.5, color='#d62728', linestyle='--')
-    ax.set_xlabel('Epoch', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Loss', fontsize=11, fontweight='bold')
-    ax.set_title('Model Loss', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # Accuracy
-    ax = axes[0, 1]
-    ax.plot(epochs, [history['accuracy'][e] for e in epochs],
-            label='Training Accuracy', linewidth=2.5, color='#2ca02c')
-    ax.plot(epochs, [history['val_accuracy'][e] for e in epochs],
-            label='Validation Accuracy', linewidth=2.5, color='#ff7f0e', linestyle='--')
-    ax.set_xlabel('Epoch', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Accuracy', fontsize=11, fontweight='bold')
-    ax.set_title('Model Accuracy', fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # Learning rate (if available)
-    ax = axes[1, 0]
-    if 'lr' in history:
-        ax.plot(epochs, [history['lr'][e] for e in epochs],
-                linewidth=2.5, color='#9467bd')
-        ax.set_xlabel('Epoch', fontsize=11, fontweight='bold')
-        ax.set_ylabel('Learning Rate', fontsize=11, fontweight='bold')
-        ax.set_title('Learning Rate Schedule', fontsize=12, fontweight='bold')
-        ax.set_yscale('log')
-    else:
-        ax.text(0.5, 0.5, 'Learning rate data not available',
-                ha='center', va='center', transform=ax.transAxes)
-        ax.set_title('Learning Rate Schedule', fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-
-    # Overfitting analysis
-    ax = axes[1, 1]
-    train_acc = [history['accuracy'][e] for e in epochs]
-    val_acc = [history['val_accuracy'][e] for e in epochs]
-    gap = [t - v for t, v in zip(train_acc, val_acc)]
-
-    ax.plot(epochs, gap, linewidth=2.5, color='#d62728', label='Train-Val Gap')
-    ax.axhline(y=0, color='k', linestyle='--', alpha=0.5)
-    ax.fill_between(epochs, 0, gap, alpha=0.3, color='#d62728')
-    ax.set_xlabel('Epoch', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Accuracy Gap', fontsize=11, fontweight='bold')
-    ax.set_title('Overfitting Analysis (Train - Val Accuracy)',
-                 fontsize=12, fontweight='bold')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    auto_display_plot(fig, save_path)
-
-
-# =============================================================================
-# INTERACTIVE WIDGETS (Colab-specific)
-# =============================================================================
-
-def create_interactive_dashboard(
-    baseline_metrics: Dict,
-    bilstm_metrics: Dict,
-    history: Optional[Dict] = None
-):
-    """
-    Create interactive dashboard with widgets (Colab only).
-
-    Args:
-        baseline_metrics: Baseline model metrics
-        bilstm_metrics: BiLSTM model metrics
-        history: Optional training history
-    """
-    if not COLAB_AVAILABLE:
-        logger.warning("Interactive dashboard requires Colab environment")
         return
 
-    def update_visualization(metric_type='accuracy', class_filter='all'):
-        """Update visualization based on widget selection."""
-        clear_output(wait=True)
+    mem = get_memory_usage()
+    logger.info(f"Memory Status {f'- {label}' if label else ''}:")
+    logger.info(f"  Used: {mem['used_gb']:.2f} GB ({mem['percent']:.1f}%)")
+    logger.info(f"  Available: {mem['available_gb']:.2f} GB")
 
-        if metric_type == 'accuracy':
-            plot_performance_comparison(baseline_metrics, bilstm_metrics)
-        elif metric_type == 'roc':
-            plot_roc_comparison(baseline_metrics, bilstm_metrics)
-        elif metric_type == 'confusion':
-            plot_confusion_matrix_comparison(baseline_metrics, bilstm_metrics)
-        elif metric_type == 'training' and history:
-            plot_training_curves_interactive(history)
+    if mem['percent'] > 90:
+        logger.warning("🚨 CRITICAL: Memory usage above 90%!")
 
-    # Create widgets
-    metric_widget = widgets.Dropdown(
-        options=['accuracy', 'roc', 'confusion', 'training'],
-        value='accuracy',
-        description='Metric:',
-        style={'description_width': 'initial'}
-    )
 
-    class_widget = widgets.Dropdown(
-        options=['all', 'negative', 'neutral', 'positive'],
-        value='all',
-        description='Class:',
-        style={'description_width': 'initial'}
-    )
+class MemoryMonitor(Callback):
+    """Callback to monitor memory during training."""
 
-    # Create interactive interface
-    interact(update_visualization,
-             metric_type=metric_widget,
-             class_filter=class_widget)
+    def on_epoch_end(self, epoch, logs=None):
+        if PSUTIL_AVAILABLE:
+            mem = get_memory_usage()
+            logger.info(f"Epoch {epoch + 1} - Memory: {mem['percent']:.1f}%")
 
-    logger.info("✓ Interactive dashboard created")
+            if mem['percent'] > 85:
+                logger.warning("⚠️  High memory usage detected")
 
 
 # =============================================================================
-# EXPORT FUNCTIONALITY
+# DATA LOADING AND PREPARATION
 # =============================================================================
 
-def export_all_visualizations(
-    baseline_metrics: Dict,
-    bilstm_metrics: Dict,
-    history: Optional[Dict] = None,
-    output_dir: str = 'comparison_results'
-):
+def load_and_prepare_data(
+    data_file: str = 'phase1_dataset.csv',
+    test_size: float = 0.2,
+    random_state: int = RANDOM_SEED
+) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
     """
-    Export all visualizations to PNG and PDF.
+    Load and prepare data for FinBERT training.
+
+    Returns:
+        Tuple of (train_df, test_df, y_train, y_test)
+    """
+    logger.info("=" * 80)
+    logger.info("LOADING AND PREPARING DATA")
+    logger.info("=" * 80)
+
+    # Load dataset
+    logger.info(f"Loading dataset: {data_file}")
+    df = pd.read_csv(data_file)
+    logger.info(f"✓ Loaded {len(df):,} samples")
+
+    # Clean texts
+    logger.info("Cleaning texts...")
+    df['clean_text'] = df['clean_text'].fillna('').apply(clean_text)
+
+    # Handle empty texts
+    empty_mask = df['clean_text'].str.strip() == ''
+    if empty_mask.sum() > 0:
+        logger.warning(
+            f"Found {empty_mask.sum()} empty texts - filling with 'unknown'")
+        df.loc[empty_mask, 'clean_text'] = 'unknown'
+
+    # Get labels
+    y = df['sentiment'].values
+
+    # Train-test split (stratified)
+    logger.info(f"Splitting data (test_size={test_size})...")
+    train_df, test_df, y_train, y_test = train_test_split(
+        df, y, test_size=test_size, stratify=y, random_state=random_state
+    )
+
+    logger.info(f"✓ Training samples: {len(train_df):,}")
+    logger.info(f"✓ Test samples: {len(test_df):,}")
+    logger.info(
+        f"  Sentiment distribution (train): {pd.Series(y_train).value_counts().sort_index().to_dict()}")
+    logger.info(
+        f"  Sentiment distribution (test): {pd.Series(y_test).value_counts().sort_index().to_dict()}")
+
+    return train_df, test_df, y_train, y_test
+
+
+def prepare_finbert_dataset(
+    texts: pd.Series,
+    labels: np.ndarray,
+    tokenizer: BertTokenizer,
+    max_length: int = MAX_LENGTH
+) -> tf.data.Dataset:
+    """
+    Prepare dataset for FinBERT training.
 
     Args:
-        baseline_metrics: Baseline model metrics
-        bilstm_metrics: BiLSTM model metrics
-        history: Optional training history
-        output_dir: Output directory path
+        texts: Series of text strings
+        labels: Array of labels (-1, 0, 1)
+        tokenizer: FinBERT tokenizer
+        max_length: Maximum sequence length
+
+    Returns:
+        TensorFlow dataset
     """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    # Map labels to 0, 1, 2 for model (FinBERT expects 0-indexed)
+    label_map = {-1: 0, 0: 1, 1: 2}
+    labels_mapped = np.array([label_map[label] for label in labels])
 
-    logger.info(f"Exporting visualizations to {output_dir}...")
-
-    # Create individual PNG files
-    plot_performance_comparison(
-        baseline_metrics, bilstm_metrics,
-        save_path=str(output_path / 'performance_comparison.png')
+    # Tokenize
+    encodings = tokenizer(
+        texts.tolist(),
+        truncation=True,
+        padding='max_length',
+        max_length=max_length,
+        return_tensors='tf'
     )
 
-    plot_roc_comparison(
-        baseline_metrics, bilstm_metrics,
-        save_path=str(output_path / 'roc_comparison.png')
+    # Create dataset
+    dataset = tf.data.Dataset.from_tensor_slices((
+        {
+            'input_ids': encodings['input_ids'],
+            'attention_mask': encodings['attention_mask']
+        },
+        labels_mapped
+    ))
+
+    return dataset
+
+
+# =============================================================================
+# FINBERT MODEL SETUP
+# =============================================================================
+
+def load_finbert_model(num_labels: int = 3):
+    """
+    Load FinBERT model and tokenizer.
+
+    Args:
+        num_labels: Number of classification labels (3: negative, neutral, positive)
+
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    logger.info("=" * 80)
+    logger.info("LOADING FINBERT MODEL")
+    logger.info("=" * 80)
+
+    model_name = "ProsusAI/finbert"
+    logger.info(f"Loading {model_name}...")
+
+    # Optional: Get token from environment if needed
+    token = None
+    hf_token = os.environ.get(
+        'HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
+    if hf_token:
+        token = hf_token
+        logger.info("✓ Using Hugging Face token from environment")
+
+    # Load tokenizer
+    tokenizer = BertTokenizer.from_pretrained(
+        model_name,
+        token=token
+    )
+    logger.info("✓ Tokenizer loaded")
+
+    # Load model configuration
+    config = BertConfig.from_pretrained(
+        model_name,
+        num_labels=num_labels,
+        hidden_dropout_prob=DROPOUT,
+        attention_probs_dropout_prob=DROPOUT,
+        token=token
     )
 
-    plot_confusion_matrix_comparison(
-        baseline_metrics, bilstm_metrics,
-        save_path=str(output_path / 'confusion_matrix_comparison.png')
+    # Load model
+    model = TFBertForSequenceClassification.from_pretrained(
+        model_name,
+        config=config,
+        token=token
+    )
+    logger.info("✓ Model loaded")
+
+    # Compile model with mixed precision
+    optimizer = Adam(learning_rate=LEARNING_RATE)
+    model.compile(
+        optimizer=optimizer,
+        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        metrics=['accuracy']
     )
 
-    if history:
-        plot_training_curves_interactive(
-            history,
-            save_path=str(output_path / 'training_curves.png')
+    logger.info(f"✓ Model compiled (dropout={DROPOUT}, lr={LEARNING_RATE})")
+
+    return model, tokenizer
+
+
+def calculate_class_weights(y: np.ndarray) -> Dict[int, float]:
+    """
+    Calculate class weights to handle imbalance.
+
+    Args:
+        y: Array of labels
+
+    Returns:
+        Dictionary mapping class index to weight
+    """
+    # Map labels to 0, 1, 2
+    label_map = {-1: 0, 0: 1, 1: 2}
+    y_mapped = np.array([label_map[label] for label in y])
+
+    classes = np.unique(y_mapped)
+    weights = compute_class_weight(
+        'balanced',
+        classes=classes,
+        y=y_mapped
+    )
+
+    class_weights = dict(zip(classes, weights))
+    logger.info(f"Class weights: {class_weights}")
+
+    return class_weights
+
+
+# =============================================================================
+# TRAINING
+# =============================================================================
+
+def train_finbert(
+    model: TFBertForSequenceClassification,
+    train_dataset: tf.data.Dataset,
+    val_dataset: tf.data.Dataset,
+    class_weights: Optional[Dict] = None,
+    epochs: int = EPOCHS,
+    batch_size: int = BATCH_SIZE,
+    patience: int = PATIENCE
+) -> tf.keras.callbacks.History:
+    """
+    Train FinBERT model.
+
+    Args:
+        model: FinBERT model
+        train_dataset: Training dataset
+        val_dataset: Validation dataset
+        class_weights: Optional class weights
+        epochs: Number of epochs
+        batch_size: Batch size
+        patience: Early stopping patience
+
+    Returns:
+        Training history
+    """
+    logger.info("=" * 80)
+    logger.info("TRAINING FINBERT")
+    logger.info("=" * 80)
+
+    # Batch datasets
+    train_dataset = train_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+    val_dataset = val_dataset.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+
+    # Prepare callbacks
+    callbacks = []
+
+    # Early stopping
+    early_stopping = EarlyStopping(
+        monitor='val_loss',
+        patience=patience,
+        restore_best_weights=True,
+        verbose=1
+    )
+    callbacks.append(early_stopping)
+
+    # Model checkpointing
+    checkpoint_path = MODEL_DIR / 'finbert_best_model.h5'
+    checkpoint = ModelCheckpoint(
+        str(checkpoint_path),
+        monitor='val_loss',
+        save_best_only=True,
+        save_weights_only=False,
+        verbose=1
+    )
+    callbacks.append(checkpoint)
+
+    # Learning rate reduction
+    reduce_lr = ReduceLROnPlateau(
+        monitor='val_loss',
+        factor=0.5,
+        patience=2,
+        min_lr=1e-7,
+        verbose=1
+    )
+    callbacks.append(reduce_lr)
+
+    # Memory monitor
+    if PSUTIL_AVAILABLE:
+        callbacks.append(MemoryMonitor())
+
+    # TensorBoard
+    try:
+        tensorboard = TensorBoard(
+            log_dir=str(OUTPUT_DIR / 'logs'),
+            histogram_freq=1
         )
+        callbacks.append(tensorboard)
+    except:
+        pass
 
-    # Create combined PDF report
-    pdf_path = output_path / 'comparison_report.pdf'
-    with PdfPages(pdf_path) as pdf:
-        # Performance comparison
-        fig, _ = plt.subplots(figsize=(16, 12))
-        plot_performance_comparison(baseline_metrics, bilstm_metrics)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    logger.info(f"Training configuration:")
+    logger.info(f"  Epochs: {epochs}")
+    logger.info(f"  Batch size: {batch_size}")
+    logger.info(f"  Learning rate: {LEARNING_RATE}")
+    logger.info(f"  Early stopping patience: {patience}")
+    if class_weights:
+        logger.info(f"  Class weights: {class_weights}")
 
-        # ROC comparison
-        fig, _ = plt.subplots(figsize=(18, 5))
-        plot_roc_comparison(baseline_metrics, bilstm_metrics)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    print_memory_status("Before training")
 
-        # Confusion matrix
-        fig, _ = plt.subplots(figsize=(16, 6))
-        plot_confusion_matrix_comparison(baseline_metrics, bilstm_metrics)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
+    # Train model
+    history = model.fit(
+        train_dataset,
+        validation_data=val_dataset,
+        epochs=epochs,
+        callbacks=callbacks,
+        class_weight=class_weights,
+        verbose=1
+    )
 
-        if history:
-            fig, _ = plt.subplots(figsize=(16, 10))
-            plot_training_curves_interactive(history)
-            pdf.savefig(fig, bbox_inches='tight')
-            plt.close(fig)
+    print_memory_status("After training")
+    logger.info("✓ Training completed")
 
-    logger.info(f"✓ All visualizations exported to {output_dir}")
-    logger.info(f"✓ PDF report saved: {pdf_path}")
+    return history
+
+
+# =============================================================================
+# EVALUATION
+# =============================================================================
+
+def evaluate_finbert(
+    model: TFBertForSequenceClassification,
+    test_dataset: tf.data.Dataset,
+    y_test: np.ndarray,
+    tokenizer: BertTokenizer
+) -> Tuple[Dict, np.ndarray, np.ndarray, Dict]:
+    """
+    Evaluate FinBERT model.
+
+    Returns:
+        Tuple of (metrics_dict, y_pred, y_pred_proba, roc_curves)
+    """
+    logger.info("=" * 80)
+    logger.info("EVALUATING FINBERT")
+    logger.info("=" * 80)
+
+    # Prepare test dataset
+    test_dataset = test_dataset.batch(BATCH_SIZE)
+
+    # Predictions
+    logger.info("Making predictions...")
+    predictions = model.predict(test_dataset, verbose=1)
+    logits = predictions.logits
+    y_pred_proba = tf.nn.softmax(logits, axis=-1).numpy()
+    y_pred = np.argmax(y_pred_proba, axis=1)
+
+    # Map predictions back to original labels (-1, 0, 1)
+    label_map_reverse = {0: -1, 1: 0, 2: 1}
+    y_pred_mapped = np.array([label_map_reverse[pred] for pred in y_pred])
+
+    # Calculate metrics
+    accuracy = accuracy_score(y_test, y_pred_mapped)
+    weighted_f1 = f1_score(y_test, y_pred_mapped, average='weighted')
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_test, y_pred_mapped, labels=[-1, 0, 1], zero_division=0
+    )
+
+    cm = confusion_matrix(y_test, y_pred_mapped, labels=[-1, 0, 1])
+
+    # ROC AUC
+    y_test_binarized = label_binarize(y_test, classes=[-1, 0, 1])
+    # Reorder probabilities: [neg, neu, pos]
+    proba_ordered = np.zeros_like(y_pred_proba)
+    proba_ordered[:, 0] = y_pred_proba[:, 0]  # -1
+    proba_ordered[:, 1] = y_pred_proba[:, 1]  # 0
+    proba_ordered[:, 2] = y_pred_proba[:, 2]  # 1
+
+    roc_auc_scores = {}
+    roc_curves = {}
+
+    for i, class_label in enumerate([-1, 0, 1]):
+        if len(np.unique(y_test_binarized[:, i])) > 1:
+            fpr, tpr, _ = roc_curve(
+                y_test_binarized[:, i], proba_ordered[:, i])
+            roc_auc = auc(fpr, tpr)
+            roc_auc_scores[f'class_{class_label}'] = roc_auc
+            roc_curves[f'class_{class_label}'] = (fpr, tpr)
+
+    # Compile metrics
+    metrics = {
+        'accuracy': float(accuracy),
+        'weighted_f1': float(weighted_f1),
+        'per_class_metrics': {
+            'negative': {
+                'precision': float(precision[0]),
+                'recall': float(recall[0]),
+                'f1': float(f1[0]),
+                'support': int(support[0])
+            },
+            'neutral': {
+                'precision': float(precision[1]),
+                'recall': float(recall[1]),
+                'f1': float(f1[1]),
+                'support': int(support[1])
+            },
+            'positive': {
+                'precision': float(precision[2]),
+                'recall': float(recall[2]),
+                'f1': float(f1[2]),
+                'support': int(support[2])
+            }
+        },
+        'confusion_matrix': cm.tolist(),
+        'roc_auc_scores': roc_auc_scores,
+        'classification_report': classification_report(
+            y_test, y_pred_mapped, labels=[-1, 0, 1], output_dict=True
+        )
+    }
+
+    logger.info(f"✓ Accuracy: {accuracy:.4f}")
+    logger.info(f"✓ Weighted F1: {weighted_f1:.4f}")
+    logger.info(f"✓ Negative F1: {f1[0]:.4f}")
+    logger.info(f"✓ Neutral F1: {f1[1]:.4f}")
+    logger.info(f"✓ Positive F1: {f1[2]:.4f}")
+
+    return metrics, y_pred_mapped, proba_ordered, roc_curves
+
+
+# =============================================================================
+# VISUALIZATIONS
+# =============================================================================
+
+def plot_training_history(history, save_path: Optional[str] = None):
+    """Plot training history."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle('FinBERT Training History', fontsize=16, fontweight='bold')
+
+    epochs = range(1, len(history.history['loss']) + 1)
+
+    axes[0].plot(epochs, history.history['loss'], 'o-',
+                 label='Training Loss', linewidth=2)
+    axes[0].plot(epochs, history.history['val_loss'], 's-',
+                 label='Validation Loss', linewidth=2)
+    axes[0].set_xlabel('Epoch', fontsize=11)
+    axes[0].set_ylabel('Loss', fontsize=11)
+    axes[0].set_title('Model Loss', fontsize=12, fontweight='bold')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(epochs, history.history['accuracy'], 'o-',
+                 label='Training Accuracy', linewidth=2)
+    axes[1].plot(epochs, history.history['val_accuracy'], 's-',
+                 label='Validation Accuracy', linewidth=2)
+    axes[1].set_xlabel('Epoch', fontsize=11)
+    axes[1].set_ylabel('Accuracy', fontsize=11)
+    axes[1].set_title('Model Accuracy', fontsize=12, fontweight='bold')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        logger.info(f"✓ Saved: {save_path}")
+    if COLAB_AVAILABLE:
+        plt.show()
+    plt.close()
+
+
+def plot_confusion_matrix(cm: np.ndarray, save_path: Optional[str] = None) -> None:
+    """Plot and save confusion matrix as a heatmap."""
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=['Negative', 'Neutral', 'Positive'],
+        yticklabels=['Negative', 'Neutral', 'Positive']
+    )
+    plt.title('Confusion Matrix - FinBERT', fontsize=16, fontweight='bold')
+    plt.ylabel('True Label', fontsize=12)
+    plt.xlabel('Predicted Label', fontsize=12)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        logger.info(f"✓ Saved: {save_path}")
+    if COLAB_AVAILABLE:
+        plt.show()
+    plt.close()
+
+
+def plot_classification_report_table(metrics: Dict, save_path: Optional[str] = None) -> None:
+    """Plot classification report as a table."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.axis('tight')
+    ax.axis('off')
+
+    data = []
+    per_class = metrics['per_class_metrics']
+
+    for label, label_name in [('negative', 'Negative'), ('neutral', 'Neutral'), ('positive', 'Positive')]:
+        data.append([
+            label_name,
+            f"{per_class[label]['precision']:.3f}",
+            f"{per_class[label]['recall']:.3f}",
+            f"{per_class[label]['f1']:.3f}",
+            per_class[label]['support']
+        ])
+
+    data.append([
+        'Weighted Avg',
+        f"{metrics['classification_report']['weighted avg']['precision']:.3f}",
+        f"{metrics['classification_report']['weighted avg']['recall']:.3f}",
+        f"{metrics['classification_report']['weighted avg']['f1-score']:.3f}",
+        metrics['classification_report']['weighted avg']['support']
+    ])
+
+    table = ax.table(
+        cellText=data,
+        colLabels=['Class', 'Precision', 'Recall', 'F1-Score', 'Support'],
+        cellLoc='center',
+        loc='center',
+        bbox=[0, 0, 1, 1]
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1, 2)
+
+    for i in range(5):
+        table[(0, i)].set_facecolor('#4CAF50')
+        table[(0, i)].set_text_props(weight='bold', color='white')
+
+    for i in range(1, len(data) + 1):
+        for j in range(5):
+            if i == len(data):
+                table[(i, j)].set_facecolor('#E8F5E9')
+            else:
+                table[(i, j)].set_facecolor('#FFFFFF')
+
+    plt.title('Classification Report - FinBERT',
+              fontsize=16, fontweight='bold', pad=20)
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        logger.info(f"✓ Saved: {save_path}")
+    if COLAB_AVAILABLE:
+        plt.show()
+    plt.close()
+
+
+def plot_roc_curves(roc_curves: Dict, metrics: Dict, save_path: Optional[str] = None) -> None:
+    """Plot ROC curves for each class (one-vs-rest)."""
+    plt.figure(figsize=(10, 8))
+
+    colors = ['red', 'blue', 'green']
+    class_labels = ['Negative', 'Neutral', 'Positive']
+    class_values = [-1, 0, 1]
+
+    for i, (class_val, class_label) in enumerate(zip(class_values, class_labels)):
+        if f'class_{class_val}' in roc_curves:
+            fpr, tpr = roc_curves[f'class_{class_val}']
+            auc_score = metrics['roc_auc_scores'].get(f'class_{class_val}', 0)
+            plt.plot(
+                fpr, tpr,
+                color=colors[i],
+                lw=2,
+                label=f'{class_label} (AUC = {auc_score:.3f})'
+            )
+
+    plt.plot([0, 1], [0, 1], 'k--', lw=2, label='Random Classifier')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate', fontsize=12)
+    plt.ylabel('True Positive Rate', fontsize=12)
+    plt.title('ROC Curves (One-vs-Rest) - FinBERT',
+              fontsize=16, fontweight='bold')
+    plt.legend(loc='lower right', fontsize=11)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        logger.info(f"✓ Saved: {save_path}")
+    if COLAB_AVAILABLE:
+        plt.show()
+    plt.close()
 
 
 # =============================================================================
@@ -720,57 +804,113 @@ def export_all_visualizations(
 # =============================================================================
 
 def main():
-    """Main function to generate all comparative visualizations."""
+    """Main function to run FinBERT fine-tuning pipeline."""
     logger.info("=" * 80)
-    logger.info("COMPARATIVE VISUALIZATION MODULE")
+    logger.info("FINBERT FINE-TUNING - PHASE 3")
     logger.info("=" * 80)
 
-    # Configure Colab display
-    configure_colab_display()
+    # Configure GPU
+    gpu_available = configure_t4_gpu()
 
-    # Check memory
-    check_memory_warning()
-
-    # Paths
-    baseline_path = 'baseline_results/baseline_metrics.json'
-    bilstm_path = 'bilstm_results/bilstm_metrics.json'
-    output_dir = 'comparison_results'
-
-    # Load metrics
-    baseline_metrics, bilstm_metrics = load_metrics(baseline_path, bilstm_path)
-
-    # Load training history if available
-    history = None
-    history_path = 'bilstm_results/training_history.json'
-    if os.path.exists(history_path):
-        history = load_training_history(history_path)
-
-    # Generate all visualizations
-    logger.info("\n📊 Generating comparative visualizations...")
-
-    plot_performance_comparison(baseline_metrics, bilstm_metrics)
-    plot_roc_comparison(baseline_metrics, bilstm_metrics)
-    plot_confusion_matrix_comparison(baseline_metrics, bilstm_metrics)
-
-    if history:
-        plot_training_curves_interactive(history)
-
-    # Export all visualizations
-    export_all_visualizations(
-        baseline_metrics, bilstm_metrics, history, output_dir
+    # Load data
+    train_df, test_df, y_train, y_test = load_and_prepare_data(
+        data_file='phase1_dataset.csv'
     )
 
-    # Create interactive dashboard (Colab only)
-    if COLAB_AVAILABLE:
-        logger.info("\n🎛️  Creating interactive dashboard...")
-        create_interactive_dashboard(baseline_metrics, bilstm_metrics, history)
+    # Split training into train and validation
+    train_df_split, val_df, y_train_split, y_val = train_test_split(
+        train_df, y_train, test_size=0.1, stratify=y_train, random_state=RANDOM_SEED
+    )
 
+    # Load FinBERT
+    model, tokenizer = load_finbert_model(num_labels=3)
+
+    # Prepare datasets
+    logger.info("Preparing datasets...")
+    train_dataset = prepare_finbert_dataset(
+        train_df_split['clean_text'], y_train_split, tokenizer
+    )
+    val_dataset = prepare_finbert_dataset(
+        val_df['clean_text'], y_val, tokenizer
+    )
+    test_dataset = prepare_finbert_dataset(
+        test_df['clean_text'], y_test, tokenizer
+    )
+
+    # Calculate class weights
+    class_weights = calculate_class_weights(y_train_split)
+
+    # Train model
+    history = train_finbert(
+        model, train_dataset, val_dataset,
+        class_weights=class_weights
+    )
+
+    # Load best model
+    best_model_path = MODEL_DIR / 'finbert_best_model.h5'
+    if best_model_path.exists():
+        logger.info(f"Loading best model from {best_model_path}")
+        model = tf.keras.models.load_model(best_model_path)
+
+    # Evaluate
+    metrics, y_pred, y_pred_proba, roc_curves = evaluate_finbert(
+        model, test_dataset, y_test, tokenizer
+    )
+
+    # Save metrics
+    metrics_path = OUTPUT_DIR / 'finbert_metrics.json'
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    logger.info(f"✓ Metrics saved: {metrics_path}")
+
+    # Save training history
+    history_dict = {
+        'loss': [float(x) for x in history.history['loss']],
+        'val_loss': [float(x) for x in history.history['val_loss']],
+        'accuracy': [float(x) for x in history.history['accuracy']],
+        'val_accuracy': [float(x) for x in history.history['val_accuracy']]
+    }
+    history_path = OUTPUT_DIR / 'training_history.json'
+    with open(history_path, 'w') as f:
+        json.dump(history_dict, f, indent=2)
+    logger.info(f"✓ Training history saved: {history_path}")
+
+    # Generate visualizations
+    logger.info("\n📊 Generating visualizations...")
+    plot_training_history(history, save_path=str(
+        PLOTS_DIR / 'training_history.png'))
+    plot_confusion_matrix(
+        np.array(metrics['confusion_matrix']),
+        save_path=str(PLOTS_DIR / 'confusion_matrix.png')
+    )
+    plot_classification_report_table(
+        metrics,
+        save_path=str(PLOTS_DIR / 'classification_report.png')
+    )
+    plot_roc_curves(
+        roc_curves,
+        metrics,
+        save_path=str(PLOTS_DIR / 'roc_curves.png')
+    )
+
+    # Print summary
     logger.info("=" * 80)
-    logger.info("✓ All visualizations generated successfully!")
+    logger.info("FINBERT TRAINING COMPLETE - SUMMARY")
+    logger.info("=" * 80)
+    logger.info(f"✓ Accuracy: {metrics['accuracy']:.4f}")
+    logger.info(f"✓ Weighted F1: {metrics['weighted_f1']:.4f}")
+    logger.info(
+        f"✓ Negative F1: {metrics['per_class_metrics']['negative']['f1']:.4f}")
+    logger.info(
+        f"✓ Neutral F1: {metrics['per_class_metrics']['neutral']['f1']:.4f}")
+    logger.info(
+        f"✓ Positive F1: {metrics['per_class_metrics']['positive']['f1']:.4f}")
+    logger.info(f"✓ Model saved to: {best_model_path}")
+    logger.info(f"✓ Metrics saved to: {metrics_path}")
+    logger.info(f"✓ Plots saved to: {PLOTS_DIR}")
     logger.info("=" * 80)
 
-    # Final memory check
-    check_memory_warning()
+    return model, metrics, history
 
 
 if __name__ == "__main__":
