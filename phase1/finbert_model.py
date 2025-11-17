@@ -18,6 +18,7 @@ Date: 2024
 =============================================================================
 """
 
+import sys
 import os
 import json
 import gc
@@ -74,20 +75,17 @@ warnings.filterwarnings('ignore')
 os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-# Hugging Face imports with PyTorch workaround
-# The issue is that transformers tries to import torch, which has CUDA issues
-# We need to handle this gracefully
+# Clean up any dummy torch modules that might interfere
+if 'torch' in sys.modules:
+    torch_module = sys.modules['torch']
+    # Check if it's a dummy module (doesn't have proper __spec__)
+    if not hasattr(torch_module, '__spec__') or torch_module.__spec__ is None:
+        # Remove the dummy module to allow real torch to import
+        del sys.modules['torch']
+
+# Hugging Face imports
+# PyTorch should now be properly installed, so we can import transformers normally
 try:
-    # Try to create a dummy torch module to prevent import errors
-    import sys
-    import types
-
-    # Create a minimal dummy torch module
-    dummy_torch = types.ModuleType('torch')
-    dummy_torch.__version__ = '1.0.0'
-    sys.modules['torch'] = dummy_torch
-
-    # Now try to import transformers
     from transformers import (
         TFBertForSequenceClassification,
         BertTokenizer,
@@ -96,30 +94,21 @@ try:
     from transformers import logging as hf_logging
     hf_logging.set_verbosity_error()
     TRANSFORMERS_AVAILABLE = True
-
-    # Remove dummy torch if real torch wasn't needed
-    if 'torch' in sys.modules and sys.modules['torch'] == dummy_torch:
-        # Keep it for now in case transformers needs it later
-        pass
-
 except Exception as e:
-    # If dummy torch approach fails, provide clear instructions
     error_msg = str(e)
-    if 'ncclCommWindowRegister' in error_msg or 'torch' in error_msg.lower():
+    if 'ncclCommWindowRegister' in error_msg or 'torch' in error_msg.lower() or 'torch.__spec__' in error_msg:
         print("=" * 80)
-        print("PYTORCH/CUDA COMPATIBILITY ISSUE DETECTED")
+        print("PYTORCH/TRANSFORMERS IMPORT ISSUE DETECTED")
         print("=" * 80)
-        print("The transformers library requires PyTorch, but PyTorch has a CUDA issue.")
+        print("The transformers library is having trouble importing PyTorch.")
         print("")
-        print("SOLUTION: Run this command before running the script:")
+        print("SOLUTION: Try restarting the Python runtime/kernel, then run:")
         print("  pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu118")
         print("")
-        print("Or if you're in Colab, restart the runtime and run:")
-        print("  !pip install --upgrade torch torchvision")
+        print("Or if you're in Colab, restart the runtime completely.")
         print("=" * 80)
         raise ImportError(
-            "PyTorch/CUDA compatibility issue. Please run:\n"
-            "pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu118\n"
+            "PyTorch/transformers import issue. Please restart the runtime and ensure PyTorch is properly installed.\n"
             f"Original error: {error_msg}"
         )
     else:
