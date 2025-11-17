@@ -189,10 +189,13 @@ def build_bilstm_model(
         metrics=['accuracy']
     )
 
+    # Build the model with input shape to enable parameter counting
+    model.build(input_shape=(None, max_length))
+
     logger.info("✓ Model architecture:")
     model.summary(print_fn=logger.info)
 
-    # Count parameters
+    # Count parameters (now that model is built)
     total_params = model.count_params()
     trainable_params = sum([tf.keras.backend.count_params(w)
                            for w in model.trainable_weights])
