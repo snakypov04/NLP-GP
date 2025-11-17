@@ -83,7 +83,51 @@ except ImportError:
     PSUTIL_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
-hf_logging.set_verbosity_error()
+
+# Prevent PyTorch import (we only need TensorFlow)
+import os
+os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
+
+# Hugging Face imports - must be after environment variable
+try:
+    # Suppress torch import errors
+    import sys
+    original_import = __builtins__.__import__
+    
+    def selective_import(name, *args, **kwargs):
+        if name == 'torch':
+            raise ImportError("Skipping torch import")
+        return original_import(name, *args, **kwargs)
+    
+    __builtins__.__import__ = selective_import
+    
+    from transformers import (
+        TFBertForSequenceClassification,
+        BertTokenizer,
+        BertConfig
+    )
+    from transformers import logging as hf_logging
+    hf_logging.set_verbosity_error()
+    TRANSFORMERS_AVAILABLE = True
+    
+    # Restore original import
+    __builtins__.__import__ = original_import
+except ImportError as e:
+    # If the selective import approach doesn't work, try direct import
+    try:
+        from transformers import (
+            TFBertForSequenceClassification,
+            BertTokenizer,
+            BertConfig
+        )
+        from transformers import logging as hf_logging
+        hf_logging.set_verbosity_error()
+        TRANSFORMERS_AVAILABLE = True
+    except Exception as e2:
+        raise ImportError(
+            f"transformers library required. Error: {e2}\n"
+            "Install with: pip install transformers"
+        )
 
 # Configure logging
 logging.basicConfig(
