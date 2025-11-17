@@ -112,4 +112,11 @@ dmypy.json
 # Profiling
 .prof
 
+# GloVe Embeddings
 phase1/embeddings/
+phase1/data/
+
+# Model Results (large files)
+phase1/finbert_results/models/
+phase1/bilstm_results/models/
+phase1/bilstm_results/logs/
