@@ -544,12 +544,14 @@ def train_finbert(
     callbacks.append(patch_callback(early_stopping))
 
     # Model checkpointing
-    checkpoint_path = MODEL_DIR / 'finbert_best_model.h5'
+    # Use SavedModel format for transformers models (subclassed models)
+    checkpoint_path = MODEL_DIR / 'finbert_best_model'
     checkpoint = ModelCheckpoint(
         str(checkpoint_path),
         monitor='val_loss',
         save_best_only=True,
         save_weights_only=False,
+        save_format='tf',  # Use TensorFlow SavedModel format
         verbose=1
     )
     callbacks.append(patch_callback(checkpoint))
@@ -914,9 +916,9 @@ def main():
         class_weights=class_weights
     )
 
-    # Load best model
-    best_model_path = MODEL_DIR / 'finbert_best_model.h5'
-    if best_model_path.exists():
+    # Load best model (SavedModel format)
+    best_model_path = MODEL_DIR / 'finbert_best_model'
+    if best_model_path.exists() and best_model_path.is_dir():
         logger.info(f"Loading best model from {best_model_path}")
         model = tf.keras.models.load_model(best_model_path)
 
