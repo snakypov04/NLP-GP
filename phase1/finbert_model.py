@@ -54,20 +54,6 @@ except ImportError as e:
     TENSORFLOW_AVAILABLE = False
     raise ImportError("TensorFlow is required")
 
-# Hugging Face imports
-try:
-    from transformers import (
-        TFBertForSequenceClassification,
-        BertTokenizer,
-        BertConfig
-    )
-    from transformers import logging as hf_logging
-    TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    raise ImportError(
-        "transformers library required. Install with: pip install transformers"
-    )
-
 # Colab-specific imports
 try:
     from IPython.display import display, HTML
@@ -84,23 +70,24 @@ except ImportError:
 
 warnings.filterwarnings('ignore')
 
-# Prevent PyTorch import (we only need TensorFlow)
-import os
+# Prevent PyTorch import issues - set environment variables first
 os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
-# Hugging Face imports - must be after environment variable
+# Hugging Face imports with PyTorch workaround
+# The issue is that transformers tries to import torch, which has CUDA issues
+# We need to handle this gracefully
 try:
-    # Suppress torch import errors
+    # Try to create a dummy torch module to prevent import errors
     import sys
-    original_import = __builtins__.__import__
-    
-    def selective_import(name, *args, **kwargs):
-        if name == 'torch':
-            raise ImportError("Skipping torch import")
-        return original_import(name, *args, **kwargs)
-    
-    __builtins__.__import__ = selective_import
-    
+    import types
+
+    # Create a minimal dummy torch module
+    dummy_torch = types.ModuleType('torch')
+    dummy_torch.__version__ = '1.0.0'
+    sys.modules['torch'] = dummy_torch
+
+    # Now try to import transformers
     from transformers import (
         TFBertForSequenceClassification,
         BertTokenizer,
@@ -109,27 +96,39 @@ try:
     from transformers import logging as hf_logging
     hf_logging.set_verbosity_error()
     TRANSFORMERS_AVAILABLE = True
-    
-    # Restore original import
-    __builtins__.__import__ = original_import
-except ImportError as e:
-    # If the selective import approach doesn't work, try direct import
-    try:
-        from transformers import (
-            TFBertForSequenceClassification,
-            BertTokenizer,
-            BertConfig
-        )
-        from transformers import logging as hf_logging
-        hf_logging.set_verbosity_error()
-        TRANSFORMERS_AVAILABLE = True
-    except Exception as e2:
+
+    # Remove dummy torch if real torch wasn't needed
+    if 'torch' in sys.modules and sys.modules['torch'] == dummy_torch:
+        # Keep it for now in case transformers needs it later
+        pass
+
+except Exception as e:
+    # If dummy torch approach fails, provide clear instructions
+    error_msg = str(e)
+    if 'ncclCommWindowRegister' in error_msg or 'torch' in error_msg.lower():
+        print("=" * 80)
+        print("PYTORCH/CUDA COMPATIBILITY ISSUE DETECTED")
+        print("=" * 80)
+        print("The transformers library requires PyTorch, but PyTorch has a CUDA issue.")
+        print("")
+        print("SOLUTION: Run this command before running the script:")
+        print("  pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu118")
+        print("")
+        print("Or if you're in Colab, restart the runtime and run:")
+        print("  !pip install --upgrade torch torchvision")
+        print("=" * 80)
         raise ImportError(
-            f"transformers library required. Error: {e2}\n"
+            "PyTorch/CUDA compatibility issue. Please run:\n"
+            "pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu118\n"
+            f"Original error: {error_msg}"
+        )
+    else:
+        raise ImportError(
+            f"transformers library import failed. Error: {error_msg}\n"
             "Install with: pip install transformers"
         )
 
-# Configure logging
+# Configure logging (must be after imports)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -432,13 +431,36 @@ def load_finbert_model(num_labels: int = 3):
     )
     logger.info("✓ Model loaded")
 
-    # Compile model with mixed precision
-    optimizer = Adam(learning_rate=LEARNING_RATE)
-    model.compile(
-        optimizer=optimizer,
-        loss=tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True),
-        metrics=['accuracy']
-    )
+    # Compile model - transformers models need optimizer as string or use get()
+    # The issue is that model.compile() from transformers expects a string identifier
+    try:
+        # Try using tf.keras.optimizers.get() which accepts string with config
+        optimizer = tf.keras.optimizers.get({
+            'class_name': 'Adam',
+            'config': {'learning_rate': LEARNING_RATE}
+        })
+        model.compile(
+            optimizer=optimizer,
+            loss=tf.keras.losses.SparseCategoricalCrossentropy(
+                from_logits=True),
+            metrics=['accuracy']
+        )
+    except Exception as e1:
+        # Fallback: compile with string and set learning rate after
+        try:
+            model.compile(
+                optimizer='adam',
+                loss=tf.keras.losses.SparseCategoricalCrossentropy(
+                    from_logits=True),
+                metrics=['accuracy']
+            )
+            # Set learning rate manually after compilation
+            model.optimizer.learning_rate.assign(LEARNING_RATE)
+            logger.info(
+                f"Compiled with 'adam' and set learning rate to {LEARNING_RATE}")
+        except Exception as e2:
+            logger.error(f"Failed to compile model: {e1}, {e2}")
+            raise
 
     logger.info(f"✓ Model compiled (dropout={DROPOUT}, lr={LEARNING_RATE})")
 
