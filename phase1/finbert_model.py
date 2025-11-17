@@ -957,11 +957,13 @@ def main():
         class_weights=class_weights
     )
 
-    # Load best model (SavedModel format)
+    # Note: Early stopping with restore_best_weights=True already restored
+    # the best weights to the model, so we don't need to reload it.
+    # The model in memory already has the best weights from epoch 2.
     best_model_path = MODEL_DIR / 'finbert_best_model'
-    if best_model_path.exists() and best_model_path.is_dir():
-        logger.info(f"Loading best model from {best_model_path}")
-        model = tf.keras.models.load_model(best_model_path)
+    logger.info(f"Best model saved to: {best_model_path}")
+    logger.info(
+        "Using model with best weights (already restored by early stopping)")
 
     # Evaluate
     metrics, y_pred, y_pred_proba, roc_curves = evaluate_finbert(
