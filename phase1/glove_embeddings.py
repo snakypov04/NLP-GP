@@ -858,3 +858,7 @@ def main():
     except Exception as e:
         logger.error(f"Error during data preparation: {e}")
         raise
+
+
+if __name__ == "__main__":
+    main()
