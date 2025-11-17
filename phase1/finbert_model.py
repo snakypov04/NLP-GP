@@ -24,6 +24,7 @@ import json
 import gc
 import warnings
 import re
+import shutil
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 from datetime import datetime
@@ -268,6 +269,48 @@ class MemoryMonitor(Callback):
 
             if mem['percent'] > 85:
                 logger.warning("⚠️  High memory usage detected")
+
+
+class SavedModelCheckpoint(Callback):
+    """Custom callback to save model in SavedModel format (for subclassed models)."""
+
+    def __init__(self, filepath, monitor='val_loss', save_best_only=True, verbose=1):
+        super().__init__()
+        self.filepath = filepath
+        self.monitor = monitor
+        self.save_best_only = save_best_only
+        self.verbose = verbose
+        self.best = float('inf')
+        self.best_weights = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        current = logs.get(self.monitor)
+
+        if current is None:
+            logger.warning(
+                f'SavedModelCheckpoint requires {self.monitor} available!')
+            return
+
+        if current < self.best:
+            previous_best = self.best
+            self.best = current
+            # Save model in SavedModel format
+            if os.path.exists(self.filepath):
+                shutil.rmtree(self.filepath)
+            self.model.save(self.filepath, save_format='tf')
+            if self.verbose > 0:
+                logger.info(
+                    f'\nEpoch {epoch + 1}: {self.monitor} improved from {previous_best:.5f} to {current:.5f}, saving model to {self.filepath}')
+        elif not self.save_best_only:
+            # Save every epoch
+            epoch_path = f"{self.filepath}_epoch_{epoch + 1}"
+            if os.path.exists(epoch_path):
+                shutil.rmtree(epoch_path)
+            self.model.save(epoch_path, save_format='tf')
+            if self.verbose > 0:
+                logger.info(
+                    f'\nEpoch {epoch + 1}: saving model to {epoch_path}')
 
 
 # =============================================================================
@@ -544,14 +587,12 @@ def train_finbert(
     callbacks.append(patch_callback(early_stopping))
 
     # Model checkpointing
-    # Use SavedModel format for transformers models (subclassed models)
+    # Use custom SavedModel checkpoint for transformers models (subclassed models)
     checkpoint_path = MODEL_DIR / 'finbert_best_model'
-    checkpoint = ModelCheckpoint(
-        str(checkpoint_path),
+    checkpoint = SavedModelCheckpoint(
+        filepath=str(checkpoint_path),
         monitor='val_loss',
         save_best_only=True,
-        save_weights_only=False,
-        save_format='tf',  # Use TensorFlow SavedModel format
         verbose=1
     )
     callbacks.append(patch_callback(checkpoint))
