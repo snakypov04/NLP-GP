@@ -15,6 +15,9 @@ Features:
 
 Expected Performance: 92-94% accuracy
 
+IMPORTANT: If you get safetensors errors, run this first in Colab:
+    pip install --upgrade transformers safetensors
+
 Author: NLP Engineering Team
 Date: 2024
 =============================================================================
@@ -330,7 +333,7 @@ def load_distilroberta_model(num_labels: int = 3):
         token = hf_token
         logger.info("✓ Using Hugging Face token from environment")
 
-    # Load tokenizer
+    # Load tokenizer (DistilRoBERTa uses same tokenizer as RoBERTa)
     tokenizer = RobertaTokenizer.from_pretrained(model_name, token=token)
     logger.info("✓ Tokenizer loaded")
 
@@ -348,12 +351,24 @@ def load_distilroberta_model(num_labels: int = 3):
         token=token
     )
 
-    # Load model
-    model = TFRobertaForSequenceClassification.from_pretrained(
-        model_name,
-        config=config,
-        token=token
-    )
+    # Load model - DistilRoBERTa can be loaded with TFRobertaForSequenceClassification
+    # Use from_pt=True to convert from PyTorch safetensors format
+    try:
+        model = TFRobertaForSequenceClassification.from_pretrained(
+            model_name,
+            config=config,
+            from_pt=True,  # Convert from PyTorch safetensors
+            token=token
+        )
+    except Exception as e:
+        logger.warning(f"Failed with from_pt=True: {e}")
+        logger.info("Trying without from_pt...")
+        # Fallback: try without from_pt
+        model = TFRobertaForSequenceClassification.from_pretrained(
+            model_name,
+            config=config,
+            token=token
+        )
 
     # Resize token embeddings to include new special tokens
     model.resize_token_embeddings(len(tokenizer))
