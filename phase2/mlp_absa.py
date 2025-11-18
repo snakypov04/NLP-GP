@@ -773,6 +773,21 @@ def plot_optimization_history(optimization_history: List[Dict], save_path: str) 
 # COMPARISON WITH BASELINE
 # =============================================================================
 
+def convert_numpy_types(obj):
+    """Convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    return obj
+
+
 def compare_with_baseline(mlp_metrics: Dict, baseline_metrics_path: str) -> None:
     """Compare MLP results with baseline."""
     logger.info("\n" + "=" * 80)
@@ -892,12 +907,13 @@ def main():
     logger.info("\nSaving results...")
     model.save(str(OUTPUT_DIR / 'mlp_model.keras'))
 
+    # Convert numpy types to native Python types for JSON serialization
     results = {
-        'best_params': opt_results['best_params'],
-        'best_validation_f1': opt_results['best_score'],
-        'optimization_history': opt_results['optimization_history'],
-        'test_metrics': test_metrics,
-        'val_metrics': val_metrics
+        'best_params': convert_numpy_types(opt_results['best_params']),
+        'best_validation_f1': float(opt_results['best_score']),
+        'optimization_history': convert_numpy_types(opt_results['optimization_history']),
+        'test_metrics': convert_numpy_types(test_metrics),
+        'val_metrics': convert_numpy_types(val_metrics)
     }
 
     with open(OUTPUT_DIR / 'mlp_metrics.json', 'w') as f:
