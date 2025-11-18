@@ -610,13 +610,21 @@ def evaluate_llama3_qlora(
     all_predictions = []
     all_labels = []
 
-    # Create test dataloader with optimizations
+    # Create data collator for evaluation (converts lists to tensors)
+    eval_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+        pad_to_multiple_of=8
+    )
+
+    # Create test dataloader with collator
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=DATALOADER_NUM_WORKERS,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=eval_collator  # Use collator to convert lists to tensors
     )
 
     label_map = {-1: 0, 0: 1, 1: 2}
@@ -624,6 +632,7 @@ def evaluate_llama3_qlora(
     name_to_label = {v: k for k, v in label_map.items()}
 
     logger.info(f"Evaluating on {len(test_loader)} batches...")
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating", unit="batch")):
             input_ids = batch['input_ids'].to(device)
@@ -664,9 +673,10 @@ def evaluate_llama3_qlora(
 
                 all_predictions.append(pred_label)
 
-            # Get true labels
+            # Get true labels (batch size might vary due to dynamic padding)
+            batch_size = batch['input_ids'].shape[0]
             true_labels = [label_map[int(y_test[batch_idx * BATCH_SIZE + i])]
-                           for i in range(len(batch['input_ids']))]
+                           for i in range(batch_size)]
             all_labels.extend(true_labels)
 
     # Convert predictions back to original label space (-1, 0, 1)
