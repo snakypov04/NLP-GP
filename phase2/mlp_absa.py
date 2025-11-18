@@ -381,8 +381,8 @@ def bayesian_optimization(
             history = model.fit(
                 X_train, y_train_mapped,  # Use mapped labels (0, 1, 2)
                 validation_data=(X_val, y_val_mapped),  # Use mapped labels
-                # Increased max epochs (early stopping will prevent overfitting)
-                epochs=100,
+                # Early stopping will prevent overfitting
+                epochs=40,
                 batch_size=64,  # Reduced from 128 for better gradient estimates
                 callbacks=[early_stopping, reduce_lr],
                 class_weight=class_weights,
@@ -854,15 +854,15 @@ def main():
     # Increased iterations and adjusted for better generalization
     opt_results = bayesian_optimization(
         X_train, y_train, X_val, y_val,
-        n_calls=60,  # Increased for better hyperparameter search
-        n_initial_points=20  # More initial exploration
+        n_calls=60,  # 60 iterations for Bayesian optimization
+        n_initial_points=15  # Initial random exploration
     )
 
     # Train final model
     model, history = train_mlp_model(
         X_train, y_train, X_val, y_val,
         opt_results['best_params'],
-        epochs=100,
+        epochs=40,
         batch_size=128
     )
 
