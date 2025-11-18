@@ -120,3 +120,4 @@ phase1/data/
 phase1/finbert_results/models/
 phase1/bilstm_results/models/
 phase1/bilstm_results/logs/
+phase2/distilroberta_absa_results/models/
