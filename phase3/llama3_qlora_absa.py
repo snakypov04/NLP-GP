@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_recall_fscore_support,
@@ -436,6 +437,8 @@ def train_llama3_qlora(
         report_to="none",
         save_total_limit=2,
         remove_unused_columns=False,
+        disable_tqdm=False,  # Enable progress bars
+        dataloader_pin_memory=True,
     )
 
     # Custom data collator
@@ -499,8 +502,9 @@ def evaluate_llama3_qlora(
     label_names = {0: "negative", 1: "neutral", 2: "positive"}
     name_to_label = {v: k for k, v in label_map.items()}
 
+    logger.info(f"Evaluating on {len(test_loader)} batches...")
     with torch.no_grad():
-        for batch_idx, batch in enumerate(test_loader):
+        for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating", unit="batch")):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
 
@@ -543,10 +547,6 @@ def evaluate_llama3_qlora(
             true_labels = [label_map[int(y_test[batch_idx * BATCH_SIZE + i])]
                            for i in range(len(batch['input_ids']))]
             all_labels.extend(true_labels)
-
-            if (batch_idx + 1) % 50 == 0:
-                logger.info(
-                    f"Processed {batch_idx + 1}/{len(test_loader)} batches")
 
     # Convert predictions back to original label space (-1, 0, 1)
     y_pred = np.array([name_to_label[p] for p in all_predictions])
@@ -733,21 +733,25 @@ def main():
 
     # Create datasets
     logger.info("Creating datasets...")
+    logger.info("Creating training dataset...")
     train_dataset = ABSADataset(
         train_df['text_for_transformer'].tolist(),
         y_train,
         tokenizer
     )
+    logger.info("Creating validation dataset...")
     val_dataset = ABSADataset(
         val_df['text_for_transformer'].tolist(),
         y_val,
         tokenizer
     )
+    logger.info("Creating test dataset...")
     test_dataset = ABSADataset(
         test_df['text_for_transformer'].tolist(),
         y_test,
         tokenizer
     )
+    logger.info("✓ All datasets created")
 
     # Train model
     trainer, train_metrics = train_llama3_qlora(
