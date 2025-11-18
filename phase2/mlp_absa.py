@@ -86,6 +86,52 @@ tf.random.set_seed(RANDOM_SEED)
 
 
 # =============================================================================
+# GPU CONFIGURATION
+# =============================================================================
+
+def configure_gpu():
+    """Configure GPU with memory growth for T4 GPU."""
+    logger.info("=" * 80)
+    logger.info("GPU CONFIGURATION")
+    logger.info("=" * 80)
+    
+    gpus = tf.config.list_physical_devices('GPU')
+    
+    if not gpus:
+        logger.warning("No GPU devices found. Using CPU.")
+        return False
+    
+    try:
+        for gpu in gpus:
+            # Enable memory growth to prevent TensorFlow from allocating all GPU memory
+            tf.config.experimental.set_memory_growth(gpu, True)
+            
+            # Get GPU details
+            try:
+                gpu_details = tf.config.experimental.get_device_details(gpu)
+                gpu_name = gpu_details.get('device_name', 'Unknown GPU')
+                logger.info(f"✓ GPU detected: {gpu_name}")
+            except:
+                logger.info(f"✓ GPU detected: {gpu.name}")
+        
+        # Optional: Enable mixed precision for faster training (FP16)
+        # Note: MLPs are usually fast enough without it, but can help with large models
+        try:
+            policy = tf.keras.mixed_precision.Policy('mixed_float16')
+            tf.keras.mixed_precision.set_global_policy(policy)
+            logger.info("✓ Mixed precision (FP16) enabled")
+        except:
+            logger.info("⚠ Mixed precision not available, using FP32")
+        
+        return True
+    
+    except RuntimeError as e:
+        logger.error(f"GPU configuration error: {e}")
+        logger.info("Continuing with CPU...")
+        return False
+
+
+# =============================================================================
 # DATA LOADING (Reuse from baseline)
 # =============================================================================
 
@@ -200,7 +246,8 @@ def build_mlp_model(
         Dropout(dropout_rate, name='dropout_3'),
 
         # Output layer (3 classes: -1, 0, 1)
-        Dense(3, activation='softmax', name='output')
+        # Use dtype='float32' for output layer if using mixed precision
+        Dense(3, activation='softmax', name='output', dtype='float32')
     ])
 
     # Compile model
@@ -765,12 +812,15 @@ def main():
     logger.info("=" * 80)
     logger.info("OPTIMIZED MLP FOR ABSA")
     logger.info("=" * 80)
-
+    
+    # Configure GPU
+    gpu_available = configure_gpu()
+    
     if not SKOPT_AVAILABLE:
         logger.error("scikit-optimize is required for Bayesian optimization.")
         logger.error("Install with: pip install scikit-optimize")
         return
-
+    
     # Configuration
     BASELINE_MODEL_PATH = 'baseline_absa_results/baseline_absa_model.joblib'
     BASELINE_METRICS_PATH = 'baseline_absa_results/baseline_absa_metrics.json'
