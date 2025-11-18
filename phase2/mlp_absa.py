@@ -270,11 +270,21 @@ def bayesian_optimization(
     best_score = -np.inf
     best_params = None
     optimization_history = []
+    iteration_count = [0]  # Use list to allow modification in nested function
     
     @use_named_args(dimensions=dimensions)
     def objective(**params):
         """Objective function for optimization."""
         nonlocal best_score, best_params
+        iteration_count[0] += 1
+        current_iter = iteration_count[0]
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Optimization Iteration {current_iter}/{n_calls}")
+        logger.info(f"{'='*60}")
+        logger.info(f"Testing parameters:")
+        for key, value in params.items():
+            logger.info(f"  {key}: {value}")
         
         try:
             # Build model
@@ -295,7 +305,7 @@ def bayesian_optimization(
                 monitor='val_loss',
                 patience=5,
                 restore_best_weights=True,
-                verbose=0
+                verbose=1
             )
             
             reduce_lr = ReduceLROnPlateau(
@@ -303,9 +313,10 @@ def bayesian_optimization(
                 factor=0.5,
                 patience=3,
                 min_lr=1e-7,
-                verbose=0
+                verbose=1
             )
             
+            logger.info(f"\nTraining model (iteration {current_iter})...")
             history = model.fit(
                 X_train, y_train,
                 validation_data=(X_val, y_val),
@@ -313,7 +324,7 @@ def bayesian_optimization(
                 batch_size=128,
                 callbacks=[early_stopping, reduce_lr],
                 class_weight=class_weights,
-                verbose=0
+                verbose=1  # Show epoch-by-epoch progress
             )
             
             # Evaluate on validation set
@@ -335,10 +346,16 @@ def bayesian_optimization(
             })
             
             # Update best
+            logger.info(f"\nIteration {current_iter} Results:")
+            logger.info(f"  Validation F1-Score: {f1:.4f}")
+            logger.info(f"  Epochs trained: {len(history.history['loss'])}")
+            
             if f1 > best_score:
                 best_score = f1
                 best_params = params.copy()
-                logger.info(f"New best F1: {f1:.4f} with params: {params}")
+                logger.info(f"  ⭐ NEW BEST! F1: {f1:.4f}")
+            else:
+                logger.info(f"  Current best F1: {best_score:.4f}")
             
             # Clean up
             del model
