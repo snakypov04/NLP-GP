@@ -358,10 +358,11 @@ def bayesian_optimization(
                 activation=params['activation']
             )
 
-            # Train with early stopping (more aggressive to prevent overfitting)
+            # Train with early stopping - monitor validation accuracy
             early_stopping = EarlyStopping(
-                monitor='val_loss',
-                patience=7,  # Increased from 5
+                monitor='val_accuracy',  # Monitor validation accuracy
+                patience=5,  # Stop if no improvement for 5 epochs
+                # Restore best weights (most important!)
                 restore_best_weights=True,
                 verbose=1,
                 min_delta=1e-4  # Minimum change to qualify as improvement
@@ -534,11 +535,11 @@ def train_mlp_model(
     logger.info("Model architecture:")
     model.summary(print_fn=logger.info)
 
-    # Callbacks (more aggressive to prevent overfitting)
+    # Callbacks - early stopping with validation accuracy monitoring
     early_stopping = EarlyStopping(
-        monitor='val_loss',
-        patience=15,  # Increased patience for final training
-        restore_best_weights=True,
+        monitor='val_accuracy',  # Monitor validation accuracy
+        patience=5,  # Stop if no improvement for 5 epochs
+        restore_best_weights=True,  # Restore best weights (most important!)
         verbose=1,
         min_delta=1e-4
     )

@@ -8,7 +8,7 @@ Optimized for Google Colab T4 GPU (16GB VRAM)
 
 Features:
 - DistilRoBERTa (faster, smaller than RoBERTa)
-- Fine-tuned on ABSA dataset with [TARGET] and [OTHER] tokens
+- Fine-tuned on ABSA dataset with 'Target' and 'Other' tokens (cased, non-bracketed)
 - Mixed precision training for T4 GPU
 - Memory-efficient training
 - Comprehensive evaluation and comparison with baseline/MLP
@@ -119,7 +119,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 RANDOM_SEED = 42
-MAX_LENGTH = 128  # Longer for ABSA (can handle [TARGET] and [OTHER] tokens)
+MAX_LENGTH = 128  # Longer for ABSA (can handle 'Target' and 'Other' tokens)
 BATCH_SIZE = 16   # Smaller batch for T4 GPU with DistilRoBERTa
 LEARNING_RATE = 2e-5
 EPOCHS = 5
@@ -220,15 +220,74 @@ def load_and_prepare_data(
     df = pd.read_csv(data_file)
     logger.info(f"✓ Loaded {len(df):,} samples")
 
-    # Use clean_text (already has [TARGET] and [OTHER] tokens)
-    df['clean_text'] = df['clean_text'].fillna('')
+    # For transformers, use ORIGINAL headlines with minimal preprocessing
+    # Transformers work much better with original case, punctuation, and numbers
+    # The clean_text is too aggressively cleaned (lowercase, no punctuation, mangled numbers)
+
+    def replace_entities_in_text(text: str, target_entity: str, all_entities_in_row: set) -> str:
+        """Replace entities with 'Target' and 'Other' placeholders, preserving original text structure."""
+        if pd.isna(text) or text == '':
+            return ''
+        text = str(text)
+
+        # Get other entities (all entities except target)
+        other_entities = all_entities_in_row - {target_entity}
+
+        # Replace other entities first (to avoid conflicts)
+        for entity in other_entities:
+            if entity and entity in text:
+                # Use word boundaries for exact matching
+                pattern = r'\b' + re.escape(entity) + r'\b'
+                text = re.sub(pattern, 'Other', text, flags=re.IGNORECASE)
+
+        # Replace target entity
+        if target_entity and target_entity in text:
+            pattern = r'\b' + re.escape(target_entity) + r'\b'
+            text = re.sub(pattern, 'Target', text, flags=re.IGNORECASE)
+
+        return text
+
+    # Get all entities per headline (for multi-entity cases)
+    # Group by headline to find all entities in each headline
+    headline_to_entities = {}
+    for _, row in df.iterrows():
+        headline = row['headline']
+        target = row['target_entity']
+        if headline not in headline_to_entities:
+            headline_to_entities[headline] = set()
+        headline_to_entities[headline].add(target)
+
+    # Create transformer-friendly text with entity replacement
+    def create_transformer_text(row):
+        headline = row['headline']
+        target_entity = row['target_entity']
+        entities_in_headline = headline_to_entities.get(
+            headline, {target_entity})
+
+        # Replace entities with placeholders
+        text = replace_entities_in_text(
+            headline, target_entity, entities_in_headline)
+
+        # Minimal cleaning: only remove URLs and normalize whitespace
+        text = re.sub(r'https?://\S+|www\.\S+', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+
+        return text if text else 'unknown'
+
+    df['text_for_transformer'] = df.apply(create_transformer_text, axis=1)
 
     # Handle empty texts
-    empty_mask = df['clean_text'].str.strip() == ''
+    empty_mask = df['text_for_transformer'].str.strip() == ''
     if empty_mask.sum() > 0:
         logger.warning(
             f"Found {empty_mask.sum()} empty texts - filling with 'unknown'")
-        df.loc[empty_mask, 'clean_text'] = 'unknown'
+        df.loc[empty_mask, 'text_for_transformer'] = 'unknown'
+
+    logger.info("✓ Created transformer-friendly text from original headlines")
+    logger.info("  - Preserved original case, punctuation, and numbers")
+    logger.info("  - Replaced entities with 'Target' and 'Other' placeholders")
+    logger.info("  - Applied minimal cleaning (URLs and whitespace only)")
 
     # Get labels
     y = df['sentiment'].values
@@ -271,7 +330,7 @@ def prepare_distilroberta_dataset(
     Prepare dataset for DistilRoBERTa training.
 
     Args:
-        texts: Series of text strings (with [TARGET] and [OTHER] tokens)
+        texts: Series of text strings (with 'Target' and 'Other' tokens)
         labels: Array of labels (-1, 0, 1)
         tokenizer: DistilRoBERTa tokenizer
         max_length: Maximum sequence length
@@ -283,7 +342,7 @@ def prepare_distilroberta_dataset(
     label_map = {-1: 0, 0: 1, 1: 2}
     labels_mapped = np.array([label_map[label] for label in labels])
 
-    # Tokenize (preserves [TARGET] and [OTHER] as tokens)
+    # Tokenize (preserves 'Target' and 'Other' as tokens)
     encodings = tokenizer(
         texts.tolist(),
         truncation=True,
@@ -337,8 +396,8 @@ def load_distilroberta_model(num_labels: int = 3):
     tokenizer = RobertaTokenizer.from_pretrained(model_name, token=token)
     logger.info("✓ Tokenizer loaded")
 
-    # Add [TARGET] and [OTHER] as special tokens if not already present
-    special_tokens = ['[TARGET]', '[OTHER]']
+    # Add 'Target' and 'Other' as special tokens if not already present
+    special_tokens = ['Target', 'Other']
     tokenizer.add_tokens(special_tokens)
     logger.info(f"✓ Added special tokens: {special_tokens}")
 
@@ -808,13 +867,13 @@ def main():
     # Prepare datasets
     logger.info("Preparing datasets...")
     train_dataset = prepare_distilroberta_dataset(
-        train_df['clean_text'], y_train, tokenizer
+        train_df['text_for_transformer'], y_train, tokenizer
     )
     val_dataset = prepare_distilroberta_dataset(
-        val_df['clean_text'], y_val, tokenizer
+        val_df['text_for_transformer'], y_val, tokenizer
     )
     test_dataset = prepare_distilroberta_dataset(
-        test_df['clean_text'], y_test, tokenizer
+        test_df['text_for_transformer'], y_test, tokenizer
     )
 
     # Calculate class weights
