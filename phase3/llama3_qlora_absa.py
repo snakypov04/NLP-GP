@@ -427,7 +427,7 @@ def train_llama3_qlora(
         logging_steps=LOGGING_STEPS,
         save_steps=SAVE_STEPS,
         eval_steps=SAVE_STEPS,
-        evaluation_strategy="steps",
+        eval_strategy="steps",  # Changed from evaluation_strategy to eval_strategy
         save_strategy="steps",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -754,18 +754,13 @@ def main():
         model, tokenizer, train_dataset, val_dataset, train_df, val_df
     )
 
-    # Load best model for evaluation
-    logger.info("Loading best model for evaluation...")
-    best_model_path = MODEL_DIR
-    model = AutoModelForCausalLM.from_pretrained(
-        str(best_model_path),
-        device_map="auto",
-        torch_dtype=torch.float16
-    )
+    # Use the best model from trainer (already loaded due to load_best_model_at_end=True)
+    logger.info("Using best model for evaluation...")
+    best_model = trainer.model
 
     # Evaluate
     metrics, y_pred, y_true = evaluate_llama3_qlora(
-        model, tokenizer, test_dataset, y_test
+        best_model, tokenizer, test_dataset, y_test
     )
 
     # Create visualizations
