@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 RANDOM_SEED = 42
-MAX_LENGTH = 64  # CRITICAL: Reduced from 256/8192 - financial headlines are ~10 words, so 64 tokens is plenty
+MAX_LENGTH = 48  # CRITICAL: Financial headlines are ~10 words (~20-30 tokens), prompt adds ~15-20 tokens, so 48 is safe
 # Optimized for Tesla T4 (16GB VRAM) - can handle larger batches now with shorter sequences
 BATCH_SIZE = 16  # Increased from 8 since we use less memory per sample
 # Effective batch size = 16 * 2 = 32 (same effective batch)
@@ -193,7 +193,7 @@ def configure_gpu():
         logger.info("")
         print(f"\n⚡ PERFORMANCE OPTIMIZATION:")
         print(
-            f"   Max sequence length: {MAX_LENGTH} tokens (was 8192 - huge speedup!)")
+            f"   Max sequence length: {MAX_LENGTH} tokens (was 8192 - ~170x reduction!)")
         print(f"   Batch size: {BATCH_SIZE}")
         print(f"   Group by length: Enabled\n")
 
@@ -538,7 +538,7 @@ def train_llama3_qlora(
         dataloader_num_workers=DATALOADER_NUM_WORKERS,  # Parallel data loading
         optim="paged_adamw_8bit",  # Memory-efficient optimizer for T4
         group_by_length=True,  # CRITICAL: Groups similar-length sequences together for speed
-        max_seq_length=MAX_LENGTH,  # CRITICAL: Limit sequence length to 64 tokens
+        # Note: max_seq_length is controlled by MAX_LENGTH in dataset tokenization (64 tokens)
     )
 
     # Custom data collator with dynamic padding (groups by length for efficiency)
