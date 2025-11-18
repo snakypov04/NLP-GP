@@ -86,14 +86,17 @@ logger = logging.getLogger(__name__)
 # Constants
 RANDOM_SEED = 42
 MAX_LENGTH = 256  # Longer context for Llama 3
-BATCH_SIZE = 4    # Small batch for QLoRA (adjust based on VRAM)
-GRADIENT_ACCUMULATION_STEPS = 8  # Effective batch size = 4 * 8 = 32
+# Optimized for Tesla T4 (16GB VRAM) - can handle larger batches
+BATCH_SIZE = 8
+# Effective batch size = 8 * 4 = 32 (same effective batch)
+GRADIENT_ACCUMULATION_STEPS = 4
 LEARNING_RATE = 2e-4  # Higher LR for LoRA
 EPOCHS = 3
 PATIENCE = 2
 WARMUP_STEPS = 100
 LOGGING_STEPS = 50
 SAVE_STEPS = 500
+DATALOADER_NUM_WORKERS = 4  # Speed up data loading on T4
 
 # LoRA hyperparameters
 LORA_R = 16
@@ -142,9 +145,28 @@ def configure_gpu():
 
     logger.info(f"✓ GPU detected: {gpu_name}")
     logger.info(f"✓ GPU Memory: {gpu_memory:.2f} GB")
+    logger.info(f"✓ CUDA Version: {torch.version.cuda}")
+    logger.info(f"✓ PyTorch Version: {torch.__version__}")
+
+    # T4-specific optimizations
+    if "T4" in gpu_name or "Tesla T4" in gpu_name:
+        logger.info("")
+        logger.info("🚀 Tesla T4 detected - applying optimizations:")
+        logger.info(f"   - Batch size: {BATCH_SIZE} (increased for T4)")
+        logger.info(
+            f"   - Gradient accumulation: {GRADIENT_ACCUMULATION_STEPS}")
+        logger.info(f"   - DataLoader workers: {DATALOADER_NUM_WORKERS}")
+        logger.info(f"   - Optimizer: paged_adamw_8bit (memory-efficient)")
+        logger.info("")
 
     # Clear cache
     torch.cuda.empty_cache()
+
+    logger.info("")
+    logger.info(
+        "💡 TIP: To monitor GPU usage during training, run in another terminal:")
+    logger.info("   watch -n 1 nvidia-smi")
+    logger.info("")
 
     return True, device
 
@@ -396,6 +418,29 @@ def load_llama3_model_and_tokenizer():
     # Print trainable parameters
     model.print_trainable_parameters()
 
+    # Verify GPU usage
+    logger.info("=" * 80)
+    logger.info("GPU VERIFICATION")
+    logger.info("=" * 80)
+    if torch.cuda.is_available():
+        # Check where model parameters are located
+        param_device = next(model.parameters()).device
+        logger.info(f"✓ Model device: {param_device}")
+
+        # Check GPU memory usage
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated(0) / (1024**3)
+            reserved = torch.cuda.memory_reserved(0) / (1024**3)
+            logger.info(
+                f"✓ GPU Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+
+        # Verify CUDA is being used
+        test_tensor = torch.tensor([1.0]).cuda()
+        logger.info(f"✓ CUDA test tensor device: {test_tensor.device}")
+        del test_tensor
+    else:
+        logger.warning("⚠ CUDA not available - model may be on CPU!")
+
     return model, tokenizer
 
 # =============================================================================
@@ -416,7 +461,7 @@ def train_llama3_qlora(
     logger.info("TRAINING LLAMA 3 WITH QLORA")
     logger.info("=" * 80)
 
-    # Training arguments
+    # Training arguments - optimized for Tesla T4
     training_args = TrainingArguments(
         output_dir=str(MODEL_DIR),
         num_train_epochs=EPOCHS,
@@ -424,11 +469,11 @@ def train_llama3_qlora(
         per_device_eval_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         learning_rate=LEARNING_RATE,
-        fp16=True,
+        fp16=True,  # T4 supports FP16
         logging_steps=LOGGING_STEPS,
         save_steps=SAVE_STEPS,
         eval_steps=SAVE_STEPS,
-        eval_strategy="steps",  # Changed from evaluation_strategy to eval_strategy
+        eval_strategy="steps",
         save_strategy="steps",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
@@ -438,7 +483,9 @@ def train_llama3_qlora(
         save_total_limit=2,
         remove_unused_columns=False,
         disable_tqdm=False,  # Enable progress bars
-        dataloader_pin_memory=True,
+        dataloader_pin_memory=True,  # Faster data transfer to GPU
+        dataloader_num_workers=DATALOADER_NUM_WORKERS,  # Parallel data loading
+        optim="paged_adamw_8bit",  # Memory-efficient optimizer for T4
     )
 
     # Custom data collator
@@ -457,8 +504,18 @@ def train_llama3_qlora(
         callbacks=[EarlyStoppingCallback(early_stopping_patience=PATIENCE)],
     )
 
+    # Verify GPU before training
+    if torch.cuda.is_available():
+        logger.info(f"✓ Training on GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(
+            f"✓ GPU Memory before training - Allocated: {torch.cuda.memory_allocated(0) / (1024**3):.2f} GB")
+    else:
+        logger.warning(
+            "⚠ WARNING: CUDA not available - training on CPU will be very slow!")
+
     # Train
     logger.info("Starting training...")
+    logger.info("=" * 80)
     train_result = trainer.train()
 
     # Save model
@@ -494,9 +551,14 @@ def evaluate_llama3_qlora(
     all_predictions = []
     all_labels = []
 
-    # Create test dataloader
+    # Create test dataloader with optimizations
     test_loader = DataLoader(
-        test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        test_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=DATALOADER_NUM_WORKERS,
+        pin_memory=True
+    )
 
     label_map = {-1: 0, 0: 1, 1: 2}
     label_names = {0: "negative", 1: "neutral", 2: "positive"}
