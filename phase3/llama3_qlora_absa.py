@@ -500,6 +500,79 @@ def load_llama3_model_and_tokenizer():
     return model, tokenizer
 
 # =============================================================================
+# LOAD SAVED MODEL
+# =============================================================================
+
+
+def load_saved_qlora_model(checkpoint_path: Path):
+    """
+    Load a saved QLoRA model from checkpoint.
+
+    Args:
+        checkpoint_path: Path to the checkpoint directory
+
+    Returns:
+        Tuple of (model, tokenizer)
+    """
+    logger.info("=" * 80)
+    logger.info("LOADING SAVED QLORA MODEL")
+    logger.info("=" * 80)
+
+    logger.info(f"Loading model from: {checkpoint_path}")
+
+    # Check for Hugging Face token
+    hf_token = os.environ.get(
+        'HF_TOKEN') or os.environ.get('HUGGINGFACE_TOKEN')
+
+    # Load base model name from adapter config
+    adapter_config_path = checkpoint_path / 'adapter_config.json'
+    if adapter_config_path.exists():
+        with open(adapter_config_path, 'r') as f:
+            adapter_config = json.load(f)
+        base_model_name = adapter_config.get(
+            'base_model_name_or_path', 'meta-llama/Meta-Llama-3-8B')
+    else:
+        base_model_name = 'meta-llama/Meta-Llama-3-8B'
+
+    logger.info(f"Base model: {base_model_name}")
+
+    # Configure 4-bit quantization (same as training)
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
+
+    # Load base model with quantization
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_name,
+        quantization_config=bnb_config,
+        device_map="auto",
+        token=hf_token,
+        trust_remote_code=True,
+        torch_dtype=torch.float16
+    )
+
+    # Load PEFT adapters
+    from peft import PeftModel
+    model = PeftModel.from_pretrained(base_model, str(checkpoint_path))
+    logger.info("✓ Model with LoRA adapters loaded")
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path))
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    logger.info("✓ Tokenizer loaded")
+
+    # Print trainable parameters
+    model.print_trainable_parameters()
+
+    return model, tokenizer
+
+# =============================================================================
 # TRAINING
 # =============================================================================
 
@@ -880,39 +953,70 @@ def main():
         data_file='absa_dataset.csv'
     )
 
-    # Load model and tokenizer
-    model, tokenizer = load_llama3_model_and_tokenizer()
+    # Check if model already exists
+    checkpoint_dirs = list(MODEL_DIR.glob('checkpoint-*'))
+    if checkpoint_dirs:
+        # Find the latest checkpoint
+        checkpoint_dirs.sort(key=lambda x: int(x.name.split('-')[1]))
+        latest_checkpoint = checkpoint_dirs[-1]
 
-    # Create datasets
-    logger.info("Creating datasets...")
-    logger.info("Creating training dataset...")
-    train_dataset = ABSADataset(
-        train_df['text_for_transformer'].tolist(),
-        y_train,
-        tokenizer
-    )
-    logger.info("Creating validation dataset...")
-    val_dataset = ABSADataset(
-        val_df['text_for_transformer'].tolist(),
-        y_val,
-        tokenizer
-    )
-    logger.info("Creating test dataset...")
-    test_dataset = ABSADataset(
-        test_df['text_for_transformer'].tolist(),
-        y_test,
-        tokenizer
-    )
-    logger.info("✓ All datasets created")
+        logger.info("=" * 80)
+        logger.info("FOUND EXISTING MODEL CHECKPOINT")
+        logger.info("=" * 80)
+        logger.info(f"Latest checkpoint: {latest_checkpoint.name}")
+        print(f"\n✅ Found saved model: {latest_checkpoint.name}")
+        print("   Skipping training and loading saved model...\n")
 
-    # Train model
-    trainer, train_metrics = train_llama3_qlora(
-        model, tokenizer, train_dataset, val_dataset, train_df, val_df
-    )
+        # Load saved model
+        best_model, tokenizer = load_saved_qlora_model(latest_checkpoint)
 
-    # Use the best model from trainer (already loaded due to load_best_model_at_end=True)
-    logger.info("Using best model for evaluation...")
-    best_model = trainer.model
+        # Create test dataset only (for evaluation)
+        logger.info("Creating test dataset for evaluation...")
+        test_dataset = ABSADataset(
+            test_df['text_for_transformer'].tolist(),
+            y_test,
+            tokenizer
+        )
+        logger.info("✓ Test dataset created")
+
+    else:
+        # No saved model - train from scratch
+        logger.info(
+            "No existing model found. Starting training from scratch...")
+
+        # Load model and tokenizer
+        model, tokenizer = load_llama3_model_and_tokenizer()
+
+        # Create datasets
+        logger.info("Creating datasets...")
+        logger.info("Creating training dataset...")
+        train_dataset = ABSADataset(
+            train_df['text_for_transformer'].tolist(),
+            y_train,
+            tokenizer
+        )
+        logger.info("Creating validation dataset...")
+        val_dataset = ABSADataset(
+            val_df['text_for_transformer'].tolist(),
+            y_val,
+            tokenizer
+        )
+        logger.info("Creating test dataset...")
+        test_dataset = ABSADataset(
+            test_df['text_for_transformer'].tolist(),
+            y_test,
+            tokenizer
+        )
+        logger.info("✓ All datasets created")
+
+        # Train model
+        trainer, train_metrics = train_llama3_qlora(
+            model, tokenizer, train_dataset, val_dataset, train_df, val_df
+        )
+
+        # Use the best model from trainer (already loaded due to load_best_model_at_end=True)
+        logger.info("Using best model for evaluation...")
+        best_model = trainer.model
 
     # Evaluate
     metrics, y_pred, y_true = evaluate_llama3_qlora(
