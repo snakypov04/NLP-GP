@@ -70,11 +70,14 @@ import logging
 
 # Suppress TensorFlow/XLA warnings (harmless but noisy)
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# Fix tokenizer parallelism warning when using DataLoader with multiple workers
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', message='.*cuFFT.*')
 warnings.filterwarnings('ignore', message='.*cuDNN.*')
 warnings.filterwarnings('ignore', message='.*cuBLAS.*')
 warnings.filterwarnings('ignore', message='.*computation placer.*')
+warnings.filterwarnings('ignore', message='.*tokenizers.*')
 
 
 # PyTorch imports
@@ -101,7 +104,8 @@ logger = logging.getLogger(__name__)
 
 # Constants
 RANDOM_SEED = 42
-MAX_LENGTH = 48  # CRITICAL: Financial headlines are ~10 words (~20-30 tokens), prompt adds ~15-20 tokens, so 48 is safe
+# CRITICAL: Financial headlines are ~10 words (~20-30 tokens), prompt adds ~15-20 tokens, so 48 is safe
+MAX_LENGTH = 48
 # Optimized for Tesla T4 (16GB VRAM) - can handle larger batches now with shorter sequences
 BATCH_SIZE = 16  # Increased from 8 since we use less memory per sample
 # Effective batch size = 16 * 2 = 32 (same effective batch)
@@ -112,7 +116,8 @@ PATIENCE = 2
 WARMUP_STEPS = 100
 LOGGING_STEPS = 50
 SAVE_STEPS = 500
-DATALOADER_NUM_WORKERS = 4  # Speed up data loading on T4
+# Set to 0 to avoid tokenizer forking issues (slight speed trade-off)
+DATALOADER_NUM_WORKERS = 0
 
 # LoRA hyperparameters
 LORA_R = 16
