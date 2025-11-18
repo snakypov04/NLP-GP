@@ -257,13 +257,18 @@ def bayesian_optimization(
         Categorical(['relu', 'tanh', 'elu'], name='activation')
     ]
     
-    # Calculate class weights
-    classes = np.unique(y_train)
+    # Map labels from -1, 0, 1 to 0, 1, 2 for training
+    label_to_index = {-1: 0, 0: 1, 1: 2}
+    y_train_mapped = np.array([label_to_index[label] for label in y_train])
+    y_val_mapped = np.array([label_to_index[label] for label in y_val])
+    
+    # Calculate class weights (using mapped labels)
+    classes_mapped = np.unique(y_train_mapped)
     class_weights_array = compute_class_weight(
-        'balanced', classes=classes, y=y_train
+        'balanced', classes=classes_mapped, y=y_train_mapped
     )
-    class_weights = {i: weight for i, weight in enumerate(classes)}
-    for i, cls in enumerate(classes):
+    class_weights = {i: weight for i, weight in enumerate(classes_mapped)}
+    for i, cls in enumerate(classes_mapped):
         class_weights[cls] = class_weights_array[i]
     
     # Track best score
@@ -318,8 +323,8 @@ def bayesian_optimization(
             
             logger.info(f"\nTraining model (iteration {current_iter})...")
             history = model.fit(
-                X_train, y_train,
-                validation_data=(X_val, y_val),
+                X_train, y_train_mapped,  # Use mapped labels (0, 1, 2)
+                validation_data=(X_val, y_val_mapped),  # Use mapped labels
                 epochs=50,
                 batch_size=128,
                 callbacks=[early_stopping, reduce_lr],
@@ -332,8 +337,8 @@ def bayesian_optimization(
             y_pred_classes = np.argmax(y_pred, axis=1)
             
             # Map predictions back to original labels (-1, 0, 1)
-            label_map = {0: -1, 1: 0, 2: 1}
-            y_pred_mapped = np.array([label_map[pred] for pred in y_pred_classes])
+            index_to_label = {0: -1, 1: 0, 2: 1}
+            y_pred_mapped = np.array([index_to_label[pred] for pred in y_pred_classes])
             
             # Calculate F1 score (we want to maximize this)
             f1 = f1_score(y_val, y_pred_mapped, average='weighted')
@@ -439,13 +444,18 @@ def train_mlp_model(
     
     input_dim = X_train.shape[1]
     
-    # Calculate class weights
-    classes = np.unique(y_train)
+    # Map labels from -1, 0, 1 to 0, 1, 2 for training
+    label_to_index = {-1: 0, 0: 1, 1: 2}
+    y_train_mapped = np.array([label_to_index[label] for label in y_train])
+    y_val_mapped = np.array([label_to_index[label] for label in y_val])
+    
+    # Calculate class weights (using mapped labels)
+    classes_mapped = np.unique(y_train_mapped)
     class_weights_array = compute_class_weight(
-        'balanced', classes=classes, y=y_train
+        'balanced', classes=classes_mapped, y=y_train_mapped
     )
     class_weights = {}
-    for i, cls in enumerate(classes):
+    for i, cls in enumerate(classes_mapped):
         class_weights[cls] = class_weights_array[i]
     
     # Build model with best parameters
@@ -482,8 +492,8 @@ def train_mlp_model(
     
     # Train
     history = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
+        X_train, y_train_mapped,  # Use mapped labels (0, 1, 2)
+        validation_data=(X_val, y_val_mapped),  # Use mapped labels
         epochs=epochs,
         batch_size=batch_size,
         callbacks=[early_stopping, reduce_lr],
@@ -525,8 +535,8 @@ def evaluate_mlp_model(
     y_pred_classes = np.argmax(y_pred_proba, axis=1)
     
     # Map predictions back to original labels (-1, 0, 1)
-    label_map = {0: -1, 1: 0, 2: 1}
-    y_pred = np.array([label_map[pred] for pred in y_pred_classes])
+    index_to_label = {0: -1, 1: 0, 2: 1}
+    y_pred = np.array([index_to_label[pred] for pred in y_pred_classes])
     
     # Basic metrics
     accuracy = accuracy_score(y, y_pred)
