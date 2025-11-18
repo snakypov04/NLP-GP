@@ -121,3 +121,6 @@ phase1/finbert_results/models/
 phase1/bilstm_results/models/
 phase1/bilstm_results/logs/
 phase2/distilroberta_absa_results/models/
+phase3/llama3_qlora_absa_results/models/
+phase3/mistral7b_qlora_absa_results/models/
+phase3/*_qlora_absa_results/models/
