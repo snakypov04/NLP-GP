@@ -25,6 +25,38 @@ Date: 2024
 =============================================================================
 """
 
+from transformers import logging as hf_logging
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+    TaskType
+)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling,
+    EarlyStoppingCallback
+)
+from torch.cuda.amp import autocast, GradScaler
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+import torch
+from sklearn.preprocessing import label_binarize
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_recall_fscore_support,
+    confusion_matrix, classification_report, roc_curve, auc,
+    roc_auc_score
+)
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 import sys
 import os
 import json
@@ -36,45 +68,29 @@ from typing import Dict, Tuple, Optional, List
 from datetime import datetime
 import logging
 
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-from tqdm import tqdm
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    accuracy_score, f1_score, precision_recall_fscore_support,
-    confusion_matrix, classification_report, roc_curve, auc,
-    roc_auc_score
-)
-from sklearn.preprocessing import label_binarize
+# Suppress TensorFlow/XLA warnings (harmless but noisy)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', message='.*cuFFT.*')
+warnings.filterwarnings('ignore', message='.*cuDNN.*')
+warnings.filterwarnings('ignore', message='.*cuBLAS.*')
+warnings.filterwarnings('ignore', message='.*computation placer.*')
+
 
 # PyTorch imports
-import torch
-import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
-from torch.cuda.amp import autocast, GradScaler
 
 # Hugging Face imports
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling,
-    EarlyStoppingCallback
-)
-from peft import (
-    LoraConfig,
-    get_peft_model,
-    prepare_model_for_kbit_training,
-    TaskType
-)
-from transformers import logging as hf_logging
 
+# Additional warning suppressions
 warnings.filterwarnings('ignore')
 hf_logging.set_verbosity_error()
+
+# Suppress TensorFlow logging
+try:
+    import tensorflow as tf
+    tf.get_logger().setLevel('ERROR')
+except ImportError:
+    pass
 
 # Configure logging
 logging.basicConfig(
@@ -131,12 +147,18 @@ if torch.cuda.is_available():
 
 def configure_gpu():
     """Configure GPU and check availability."""
+    import sys
+    sys.stdout.flush()
+    
     logger.info("=" * 80)
-    logger.info("GPU CONFIGURATION")
+    logger.info("GPU CONFIGURATION (DETAILED)")
     logger.info("=" * 80)
+    sys.stdout.flush()
 
     if not torch.cuda.is_available():
-        logger.warning("CUDA not available. Training will be slow on CPU.")
+        logger.warning("✗ CUDA not available. Training will be slow on CPU.")
+        print("✗ CUDA NOT AVAILABLE!")
+        sys.stdout.flush()
         return False, None
 
     device = torch.device("cuda")
@@ -147,6 +169,12 @@ def configure_gpu():
     logger.info(f"✓ GPU Memory: {gpu_memory:.2f} GB")
     logger.info(f"✓ CUDA Version: {torch.version.cuda}")
     logger.info(f"✓ PyTorch Version: {torch.__version__}")
+    
+    # Also print to stdout for immediate visibility
+    print(f"\n🚀 GPU CONFIRMED: {gpu_name}")
+    print(f"   Memory: {gpu_memory:.2f} GB")
+    print(f"   Device: {device}\n")
+    sys.stdout.flush()
 
     # T4-specific optimizations
     if "T4" in gpu_name or "Tesla T4" in gpu_name:
@@ -419,13 +447,21 @@ def load_llama3_model_and_tokenizer():
     model.print_trainable_parameters()
 
     # Verify GPU usage
+    import sys
+    sys.stdout.flush()
+    
     logger.info("=" * 80)
-    logger.info("GPU VERIFICATION")
+    logger.info("GPU VERIFICATION AFTER MODEL LOADING")
     logger.info("=" * 80)
     if torch.cuda.is_available():
         # Check where model parameters are located
         param_device = next(model.parameters()).device
         logger.info(f"✓ Model device: {param_device}")
+        print(f"\n✅ MODEL IS ON: {param_device}")
+        if 'cuda' in str(param_device):
+            print("   ✓ GPU is being used for training!")
+        else:
+            print("   ⚠ WARNING: Model is NOT on GPU!")
 
         # Check GPU memory usage
         if torch.cuda.is_available():
@@ -433,13 +469,18 @@ def load_llama3_model_and_tokenizer():
             reserved = torch.cuda.memory_reserved(0) / (1024**3)
             logger.info(
                 f"✓ GPU Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+            print(f"   GPU Memory: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
 
         # Verify CUDA is being used
         test_tensor = torch.tensor([1.0]).cuda()
         logger.info(f"✓ CUDA test tensor device: {test_tensor.device}")
         del test_tensor
+        print("   ✓ CUDA tensor operations working\n")
     else:
         logger.warning("⚠ CUDA not available - model may be on CPU!")
+        print("⚠ WARNING: CUDA not available - model may be on CPU!\n")
+    
+    sys.stdout.flush()
 
     return model, tokenizer
 
@@ -778,12 +819,33 @@ def compare_with_distilroberta(llama_metrics: Dict):
 
 def main():
     """Main function to run QLoRA fine-tuning pipeline."""
+    # Force immediate output
+    import sys
+    sys.stdout.flush()
+    
     logger.info("=" * 80)
     logger.info("LLAMA 3 8B QLORA FINE-TUNING FOR ABSA")
     logger.info("=" * 80)
+    sys.stdout.flush()
 
-    # Configure GPU
+    # Quick GPU check first
+    print("\n" + "="*80)
+    print("QUICK GPU CHECK")
+    print("="*80)
+    if torch.cuda.is_available():
+        print(f"✓ CUDA Available: YES")
+        print(f"✓ GPU Name: {torch.cuda.get_device_name(0)}")
+        print(f"✓ GPU Count: {torch.cuda.device_count()}")
+        print(f"✓ Current Device: {torch.cuda.current_device()}")
+        print("="*80 + "\n")
+    else:
+        print("✗ CUDA NOT AVAILABLE - Training will be VERY SLOW on CPU!")
+        print("="*80 + "\n")
+    sys.stdout.flush()
+
+    # Configure GPU (detailed)
     gpu_available, device = configure_gpu()
+    sys.stdout.flush()
 
     # Load data
     train_df, val_df, test_df, y_train, y_val, y_test = load_and_prepare_data(
