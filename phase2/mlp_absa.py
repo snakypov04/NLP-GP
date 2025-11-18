@@ -94,18 +94,18 @@ def configure_gpu():
     logger.info("=" * 80)
     logger.info("GPU CONFIGURATION")
     logger.info("=" * 80)
-    
+
     gpus = tf.config.list_physical_devices('GPU')
-    
+
     if not gpus:
         logger.warning("No GPU devices found. Using CPU.")
         return False
-    
+
     try:
         for gpu in gpus:
             # Enable memory growth to prevent TensorFlow from allocating all GPU memory
             tf.config.experimental.set_memory_growth(gpu, True)
-            
+
             # Get GPU details
             try:
                 gpu_details = tf.config.experimental.get_device_details(gpu)
@@ -113,7 +113,7 @@ def configure_gpu():
                 logger.info(f"✓ GPU detected: {gpu_name}")
             except:
                 logger.info(f"✓ GPU detected: {gpu.name}")
-        
+
         # Optional: Enable mixed precision for faster training (FP16)
         # Note: MLPs are usually fast enough without it, but can help with large models
         try:
@@ -122,9 +122,9 @@ def configure_gpu():
             logger.info("✓ Mixed precision (FP16) enabled")
         except:
             logger.info("⚠ Mixed precision not available, using FP32")
-        
+
         return True
-    
+
     except RuntimeError as e:
         logger.error(f"GPU configuration error: {e}")
         logger.info("Continuing with CPU...")
@@ -812,15 +812,15 @@ def main():
     logger.info("=" * 80)
     logger.info("OPTIMIZED MLP FOR ABSA")
     logger.info("=" * 80)
-    
+
     # Configure GPU
     gpu_available = configure_gpu()
-    
+
     if not SKOPT_AVAILABLE:
         logger.error("scikit-optimize is required for Bayesian optimization.")
         logger.error("Install with: pip install scikit-optimize")
         return
-    
+
     # Configuration
     BASELINE_MODEL_PATH = 'baseline_absa_results/baseline_absa_model.joblib'
     BASELINE_METRICS_PATH = 'baseline_absa_results/baseline_absa_metrics.json'
